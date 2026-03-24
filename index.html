@@ -39,7 +39,7 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v1.3.0";
+const APP_VERSION="v1.4.0";
 const BUILD_DATE="2026-03-24";
 
 /* ── Valuation Engine ── */
@@ -101,50 +101,67 @@ async function testMassiveKey(key){
 async function fetchFMP(ticker,key){
   const b="https://financialmodelingprep.com/stable";
   const k="&apikey="+key;
-  const[prof,met,est,qt]=await Promise.allSettled([
+
+  // Fetch from 5 endpoints in parallel - key-metrics (annual) as fallback for TTM
+  const[prof,metTTM,metAnn,est,qt]=await Promise.allSettled([
     fetch(b+"/profile?symbol="+ticker+k).then(r=>r.json()),
     fetch(b+"/key-metrics-ttm?symbol="+ticker+k).then(r=>r.json()),
+    fetch(b+"/key-metrics?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
     fetch(b+"/analyst-estimates?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
     fetch(b+"/quote?symbol="+ticker+k).then(r=>r.json()),
   ]);
-  // Safely extract first item from array responses, or use object directly
-  const extract=r=>{
-    if(r.status!=="fulfilled"||!r.value)return null;
+
+  // Safely extract first item from array or object responses
+  const extract=(r,label)=>{
+    if(r.status!=="fulfilled"||!r.value){console.log("FMP "+label+": failed/empty");return null;}
     const v=r.value;
-    if(Array.isArray(v))return v[0]||null;
-    if(v["Error Message"]||v.message||v.error)return null;
-    return typeof v==="object"?v:null;
+    if(Array.isArray(v)){console.log("FMP "+label+" (array["+v.length+"]):",v[0]);return v[0]||null;}
+    if(v["Error Message"]||v.message||v.error){console.log("FMP "+label+" error:",v["Error Message"]||v.message||v.error);return null;}
+    if(typeof v==="object"){console.log("FMP "+label+" (obj):",v);return v;}
+    return null;
   };
-  const profile=extract(prof);
-  const metrics=extract(met);
-  const estimates=extract(est);
-  const quote=extract(qt);
-  console.log("FMP raw data:",{profile,metrics,estimates,quote});
+
+  const profile=extract(prof,"profile");
+  const metricsTTM=extract(metTTM,"key-metrics-ttm");
+  const metricsAnn=extract(metAnn,"key-metrics-annual");
+  const estimates=extract(est,"analyst-estimates");
+  const quote=extract(qt,"quote");
+
   if(!profile&&!quote)throw new Error("No FMP data for "+ticker);
+
+  // Helper: find a numeric value across multiple objects and field names
+  const find=(sources,fields)=>{
+    for(const src of sources){
+      if(!src)continue;
+      for(const f of fields){
+        const v=src[f];
+        if(v!==undefined&&v!==null&&v!==0&&v!=="")return Number(v);
+      }
+    }
+    return 0;
+  };
+
+  // Merge metrics: prefer TTM, fallback to annual
+  const mSources=[metricsTTM,metricsAnn];
+  const allSources=[quote,profile,metricsTTM,metricsAnn];
+
   const d={};
-  if(quote){
-    d.price=quote.price||0;
-    d.epsTtm=quote.eps||0;
-    d.peTarget=quote.pe?Math.round(quote.pe):15;
-  }
+  d.price=find([quote,profile],["price"])||0;
+  d.epsTtm=find([quote],["eps","epsTTM","earningsPerShare"])||0;
+  d.epsFwd=find([estimates],["estimatedEpsAvg","estimatedEpsHigh","epsAvg"])||0;
+  d.bvps=find(mSources,["bookValuePerShareTTM","bookValuePerShare","tangibleBookValuePerShareTTM","tangibleBookValuePerShare"])||0;
+  d.fcf=find(mSources,["freeCashFlowPerShareTTM","freeCashFlowPerShare"])||0;
+  d.dividend=find(mSources,["dividendPerShareTTM","dividendPerShare"])||find([profile],["lastDiv"])||0;
+  d.peTarget=find([quote],["pe","priceEarningsRatio"])||15;
+  d.peTarget=d.peTarget>0?Math.round(d.peTarget):15;
+
   if(profile){
-    if(!d.price)d.price=profile.price||0;
-    d.dividend=profile.lastDiv||0;
     d.sector=SECTOR_MAP[profile.sector]||profile.sector||"Industrials";
-    d.companyName=profile.companyName||ticker;
+    d.companyName=profile.companyName||profile.name||ticker;
     d.industry=profile.industry||"";
   }
-  if(metrics){
-    // Stable TTM endpoint may use either naming convention
-    d.bvps=metrics.bookValuePerShareTTM||metrics.bookValuePerShare||0;
-    d.fcf=metrics.freeCashFlowPerShareTTM||metrics.freeCashFlowPerShare||0;
-    const divPS=metrics.dividendPerShareTTM||metrics.dividendPerShare;
-    if(divPS)d.dividend=divPS;
-  }
-  if(estimates){
-    d.epsFwd=estimates.estimatedEpsAvg||0;
-  }
-  console.log("FMP parsed:",d);
+
+  console.log("FMP final parsed:",d);
   return d;
 }
 async function fetchMassivePrice(ticker,key){
