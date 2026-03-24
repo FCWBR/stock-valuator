@@ -76,10 +76,12 @@ const pct=v=>(v*100).toFixed(1)+"%";
 
 /* ── API Layer ── */
 async function testFMPKey(key){
-  const r=await fetch("https://financialmodelingprep.com/api/v3/profile/AAPL?apikey="+key);
+  const r=await fetch("https://financialmodelingprep.com/stable/profile?symbol=AAPL&apikey="+key);
   const d=await r.json();
-  if(d["Error Message"]||d.message)throw new Error(d["Error Message"]||d.message);
-  if(!Array.isArray(d)||d.length===0)throw new Error("Invalid response");
+  if(d["Error Message"])throw new Error(d["Error Message"]);
+  if(d.message)throw new Error(d.message);
+  if(d.error)throw new Error(d.error);
+  if(!Array.isArray(d)||d.length===0)throw new Error("Invalid response — check your API key");
   return true;
 }
 async function testMassiveKey(key){
@@ -91,12 +93,13 @@ async function testMassiveKey(key){
 }
 
 async function fetchFMP(ticker,key){
-  const b="https://financialmodelingprep.com/api/v3";
+  const b="https://financialmodelingprep.com/stable";
+  const k="&apikey="+key;
   const[prof,met,est,qt]=await Promise.allSettled([
-    fetch(b+"/profile/"+ticker+"?apikey="+key).then(r=>r.json()),
-    fetch(b+"/key-metrics-ttm/"+ticker+"?apikey="+key).then(r=>r.json()),
-    fetch(b+"/analyst-estimates/"+ticker+"?limit=1&apikey="+key).then(r=>r.json()),
-    fetch(b+"/quote/"+ticker+"?apikey="+key).then(r=>r.json()),
+    fetch(b+"/profile?symbol="+ticker+k).then(r=>r.json()),
+    fetch(b+"/key-metrics?symbol="+ticker+"&period=ttm"+k).then(r=>r.json()),
+    fetch(b+"/analyst-estimates?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
+    fetch(b+"/quote?symbol="+ticker+k).then(r=>r.json()),
   ]);
   const profile=prof.status==="fulfilled"&&Array.isArray(prof.value)?prof.value[0]:null;
   const metrics=met.status==="fulfilled"&&Array.isArray(met.value)?met.value[0]:null;
@@ -106,7 +109,7 @@ async function fetchFMP(ticker,key){
   const d={};
   if(quote){d.price=quote.price||0;d.epsTtm=quote.eps||0;d.peTarget=quote.pe?Math.round(quote.pe):15;}
   if(profile){if(!d.price)d.price=profile.price||0;d.dividend=profile.lastDiv||0;d.sector=SECTOR_MAP[profile.sector]||profile.sector||"Industrials";d.companyName=profile.companyName||ticker;d.industry=profile.industry||"";}
-  if(metrics){d.bvps=metrics.bookValuePerShareTTM||0;d.fcf=metrics.freeCashFlowPerShareTTM||0;if(metrics.dividendPerShareTTM)d.dividend=metrics.dividendPerShareTTM;}
+  if(metrics){d.bvps=metrics.bookValuePerShareTTM||metrics.bookValuePerShare||0;d.fcf=metrics.freeCashFlowPerShareTTM||metrics.freeCashFlowPerShare||0;const divPS=metrics.dividendPerShareTTM||metrics.dividendPerShare;if(divPS)d.dividend=divPS;}
   if(estimates){d.epsFwd=estimates.estimatedEpsAvg||0;}
   return d;
 }
