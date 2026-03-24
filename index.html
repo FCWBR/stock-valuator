@@ -39,7 +39,7 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v1.5.1";
+const APP_VERSION="v1.5.2";
 const BUILD_DATE="2026-03-24";
 
 /* ── Valuation Engine ── */
@@ -153,12 +153,18 @@ async function fetchFMP(ticker,key){
   const equity=num(balance?.totalStockholdersEquity)||num(balance?.totalEquity)||0;
   d.bvps=shares>0&&equity>0?equity/shares:0;
 
-  // FCF Per Share — from cash flow statement
-  const fcfTotal=num(cashflow?.freeCashFlow)||0;
+  // FCF Per Share — compute from operatingCashFlow - capitalExpenditure
+  const opCF=num(cashflow?.operatingCashFlow)||num(cashflow?.netCashProvidedByOperatingActivities)||0;
+  const capex=num(cashflow?.capitalExpenditure)||num(cashflow?.capitalExpenditures)||0;
+  // capex is typically negative in FMP; freeCashFlow may also be pre-computed
+  const fcfTotal=num(cashflow?.freeCashFlow)||(opCF>0?(opCF-Math.abs(capex)):0);
   d.fcf=shares>0&&fcfTotal!==0?fcfTotal/shares:0;
 
-  // Dividend — from profile or income statement
-  d.dividend=num(profile?.lastDiv)||num(income?.dividendsPaid&&shares?Math.abs(income.dividendsPaid)/shares:0)||0;
+  // Dividend Per Share — from profile, or compute from cashflow dividendsPaid
+  const profDiv=num(profile?.lastDiv)||num(profile?.lastDividend)||0;
+  const cfDivPaid=num(cashflow?.dividendsPaid)||num(cashflow?.commonStockDividendsPaid)||0;
+  const divPerShare=profDiv>0?profDiv:(shares>0&&cfDivPaid!==0?Math.abs(cfDivPaid)/shares:0);
+  d.dividend=divPerShare;
 
   // Forward EPS — from analyst estimates
   d.epsFwd=num(estimates?.estimatedEpsAvg)||num(estimates?.estimatedEpsHigh)||0;
