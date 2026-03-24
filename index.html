@@ -81,8 +81,11 @@ async function testFMPKey(key){
   if(d["Error Message"])throw new Error(d["Error Message"]);
   if(d.message)throw new Error(d.message);
   if(d.error)throw new Error(d.error);
-  if(!Array.isArray(d)||d.length===0)throw new Error("Invalid response — check your API key");
-  return true;
+  // Stable endpoints return arrays
+  if(Array.isArray(d)&&d.length>0)return true;
+  // Or possibly an object with a symbol field
+  if(d&&d.symbol)return true;
+  throw new Error("Invalid response — check your API key");
 }
 async function testMassiveKey(key){
   const r=await fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/AAPL?apiKey="+key);
@@ -97,20 +100,48 @@ async function fetchFMP(ticker,key){
   const k="&apikey="+key;
   const[prof,met,est,qt]=await Promise.allSettled([
     fetch(b+"/profile?symbol="+ticker+k).then(r=>r.json()),
-    fetch(b+"/key-metrics?symbol="+ticker+"&period=ttm"+k).then(r=>r.json()),
+    fetch(b+"/key-metrics-ttm?symbol="+ticker+k).then(r=>r.json()),
     fetch(b+"/analyst-estimates?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
     fetch(b+"/quote?symbol="+ticker+k).then(r=>r.json()),
   ]);
-  const profile=prof.status==="fulfilled"&&Array.isArray(prof.value)?prof.value[0]:null;
-  const metrics=met.status==="fulfilled"&&Array.isArray(met.value)?met.value[0]:null;
-  const estimates=est.status==="fulfilled"&&Array.isArray(est.value)?est.value[0]:null;
-  const quote=qt.status==="fulfilled"&&Array.isArray(qt.value)?qt.value[0]:null;
+  // Safely extract first item from array responses, or use object directly
+  const extract=r=>{
+    if(r.status!=="fulfilled"||!r.value)return null;
+    const v=r.value;
+    if(Array.isArray(v))return v[0]||null;
+    if(v["Error Message"]||v.message||v.error)return null;
+    return typeof v==="object"?v:null;
+  };
+  const profile=extract(prof);
+  const metrics=extract(met);
+  const estimates=extract(est);
+  const quote=extract(qt);
+  console.log("FMP raw data:",{profile,metrics,estimates,quote});
   if(!profile&&!quote)throw new Error("No FMP data for "+ticker);
   const d={};
-  if(quote){d.price=quote.price||0;d.epsTtm=quote.eps||0;d.peTarget=quote.pe?Math.round(quote.pe):15;}
-  if(profile){if(!d.price)d.price=profile.price||0;d.dividend=profile.lastDiv||0;d.sector=SECTOR_MAP[profile.sector]||profile.sector||"Industrials";d.companyName=profile.companyName||ticker;d.industry=profile.industry||"";}
-  if(metrics){d.bvps=metrics.bookValuePerShareTTM||metrics.bookValuePerShare||0;d.fcf=metrics.freeCashFlowPerShareTTM||metrics.freeCashFlowPerShare||0;const divPS=metrics.dividendPerShareTTM||metrics.dividendPerShare;if(divPS)d.dividend=divPS;}
-  if(estimates){d.epsFwd=estimates.estimatedEpsAvg||0;}
+  if(quote){
+    d.price=quote.price||0;
+    d.epsTtm=quote.eps||0;
+    d.peTarget=quote.pe?Math.round(quote.pe):15;
+  }
+  if(profile){
+    if(!d.price)d.price=profile.price||0;
+    d.dividend=profile.lastDiv||0;
+    d.sector=SECTOR_MAP[profile.sector]||profile.sector||"Industrials";
+    d.companyName=profile.companyName||ticker;
+    d.industry=profile.industry||"";
+  }
+  if(metrics){
+    // Stable TTM endpoint may use either naming convention
+    d.bvps=metrics.bookValuePerShareTTM||metrics.bookValuePerShare||0;
+    d.fcf=metrics.freeCashFlowPerShareTTM||metrics.freeCashFlowPerShare||0;
+    const divPS=metrics.dividendPerShareTTM||metrics.dividendPerShare;
+    if(divPS)d.dividend=divPS;
+  }
+  if(estimates){
+    d.epsFwd=estimates.estimatedEpsAvg||0;
+  }
+  console.log("FMP parsed:",d);
   return d;
 }
 async function fetchMassivePrice(ticker,key){
