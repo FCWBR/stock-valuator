@@ -39,6 +39,9 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
+const APP_VERSION="v1.3.0";
+const BUILD_DATE="2026-03-24";
+
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
   if(r<=gT||fcf<=0)return{projectedValue:0,terminalPV:0,total:0};
@@ -416,6 +419,7 @@ function App(){
             <div style={{display:"flex",alignItems:"baseline",gap:12}}>
               <h1 style={{fontFamily:sans,fontSize:22,fontWeight:700,color:"#e8eaed",letterSpacing:"-.02em"}}>Intrinsic Value</h1>
               <span style={{fontSize:10,color:"#565b64",letterSpacing:".08em"}}>MULTI-MODEL</span>
+              <span style={{fontSize:9,color:"#3a3d45",letterSpacing:".05em"}}>{APP_VERSION} · {BUILD_DATE}</span>
             </div>
             <p style={{fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5}}>DCF · Dividend Discount · P/E Multiple · Graham Number — blended with conditional weighting</p>
           </div>
