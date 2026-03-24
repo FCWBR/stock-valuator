@@ -39,8 +39,8 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v1.6.0";
-const BUILD_DATE="2026-03-24 23:05";
+const APP_VERSION="v2.0.0";
+const BUILD_DATE="2026-03-24 23:30";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -183,12 +183,59 @@ async function fetchFMP(ticker,key){
   console.log("FMP final:",d);
   return {parsed:d, raw:{profile,quote,income,balance,cashflow,estimates,shares}};
 }
-async function fetchMassivePrice(ticker,key){
-  const r=await fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/"+ticker+"?apiKey="+key);
-  const d=await r.json();
-  if(d?.ticker?.day?.c)return{price:d.ticker.day.c};
-  if(d?.ticker?.lastTrade?.p)return{price:d.ticker.lastTrade.p};
-  return null;
+async function fetchMassive(ticker,key){
+  const k="&apiKey="+key;
+  const[snap,fin]=await Promise.allSettled([
+    fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/"+ticker+"?apiKey="+key).then(r=>r.json()),
+    fetch("https://api.massive.com/vX/reference/financials?ticker="+ticker+"&timeframe=annual&limit=1&order=desc&sort=filing_date"+k).then(r=>r.json()),
+  ]);
+
+  const d={raw:{}};
+
+  // Price from snapshot
+  const snapData=snap.status==="fulfilled"?snap.value:null;
+  d.raw.snapshot=snapData?.ticker||null;
+  if(snapData?.ticker?.day?.c)d.price=snapData.ticker.day.c;
+  else if(snapData?.ticker?.lastTrade?.p)d.price=snapData.ticker.lastTrade.p;
+
+  // Fundamentals from financials endpoint
+  const finData=fin.status==="fulfilled"?fin.value:null;
+  const finResult=finData?.results?.[0];
+  d.raw.financials=finResult||null;
+  console.log("Massive snapshot:",d.raw.snapshot);
+  console.log("Massive financials:",finResult);
+
+  if(finResult?.financials){
+    const fs=finResult.financials;
+    const val=(obj)=>obj?.value||0;
+    const num=v=>(typeof v==="number"?v:parseFloat(v))||0;
+
+    // Income statement
+    const is=fs.income_statement||{};
+    const eps=num(val(is.basic_earnings_per_share))||num(val(is.diluted_earnings_per_share))||0;
+    const netIncome=num(val(is.net_income_loss))||0;
+
+    // Balance sheet
+    const bs=fs.balance_sheet||{};
+    const equity=num(val(bs.equity))||num(val(bs.stockholders_equity))||0;
+    const shares=num(val(bs.common_stock_shares_outstanding))||num(val(is.basic_average_shares))||num(val(is.diluted_average_shares))||0;
+
+    // Cash flow
+    const cf=fs.cash_flow_statement||{};
+    const opCF=num(val(cf.net_cash_flow_from_operating_activities))||0;
+    const capex=Math.abs(num(val(cf.net_cash_flow_from_investing_activities_continuing))||0);
+    const fcf=opCF-(capex>0?capex:0);
+
+    if(eps!==0)d.epsTtm=eps;
+    else if(netIncome!==0&&shares>0)d.epsTtm=netIncome/shares;
+    if(equity!==0&&shares>0)d.bvps=Math.round((equity/shares)*100)/100;
+    if(fcf!==0&&shares>0)d.fcf=Math.round((fcf/shares)*100)/100;
+    else if(opCF!==0&&shares>0)d.fcf=Math.round((opCF/shares)*100)/100;
+
+    d._shares=shares;
+  }
+
+  return d;
 }
 
 /* ── Shared Styles ── */
@@ -422,16 +469,29 @@ function App(){
     if(!params.ticker.trim())return;
     if(!keys.fmp&&!keys.massive){setSettingsOpen(true);return;}
     setFetchSt({loading:true,error:null,sources:[]});
-    const srcs=[];let fd={};
+    const srcs=[];let fd={};let rawDebug={};
     try{
+      // FMP: primary source
       if(keys.fmp){
-        try{const res=await fetchFMP(params.ticker.trim(),keys.fmp);fd={...fd,...res.parsed};setDebugData(res.raw);srcs.push("FMP");setApiStatus(p=>({...p,fmp:"connected"}));}
+        try{const res=await fetchFMP(params.ticker.trim(),keys.fmp);fd={...fd,...res.parsed};rawDebug={...res.raw};srcs.push("FMP");setApiStatus(p=>({...p,fmp:"connected"}));}
         catch(e){console.warn("FMP:",e.message);setApiStatus(p=>({...p,fmp:"error"}));}
       }
+      // Massive: price + fallback fundamentals for missing fields
       if(keys.massive){
-        try{const d=await fetchMassivePrice(params.ticker.trim(),keys.massive);if(d?.price>0){fd.price=d.price;srcs.push("Massive");}setApiStatus(p=>({...p,massive:"connected"}));}
-        catch(e){console.warn("Massive:",e.message);setApiStatus(p=>({...p,massive:"error"}));}
+        try{
+          const m=await fetchMassive(params.ticker.trim(),keys.massive);
+          rawDebug.massiveSnapshot=m.raw.snapshot;
+          rawDebug.massiveFinancials=m.raw.financials;
+          if(m.price>0){fd.price=m.price;}
+          // Fill in any fields that FMP left at 0
+          if(!fd.epsTtm&&m.epsTtm)fd.epsTtm=m.epsTtm;
+          if(!fd.bvps&&m.bvps)fd.bvps=m.bvps;
+          if(!fd.fcf&&m.fcf)fd.fcf=m.fcf;
+          srcs.push("Massive");
+          setApiStatus(p=>({...p,massive:"connected"}));
+        }catch(e){console.warn("Massive:",e.message);setApiStatus(p=>({...p,massive:"error"}));}
       }
+      setDebugData(rawDebug);
       if(srcs.length===0)throw new Error("All API calls failed — check your keys and ticker symbol.");
       setParams(p=>({...p,
         price:fd.price||p.price,epsTtm:fd.epsTtm??p.epsTtm,epsFwd:fd.epsFwd??p.epsFwd,
