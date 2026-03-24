@@ -39,7 +39,7 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v1.5.0";
+const APP_VERSION="v1.5.1";
 const BUILD_DATE="2026-03-24";
 
 /* ── Valuation Engine ── */
@@ -170,7 +170,7 @@ async function fetchFMP(ticker,key){
   }
 
   console.log("FMP final:",d,"(shares:",shares,")");
-  return d;
+  return {parsed:d, raw:{profile,quote,income,balance,cashflow,estimates,shares}};
 }
 async function fetchMassivePrice(ticker,key){
   const r=await fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/"+ticker+"?apiKey="+key);
@@ -381,6 +381,8 @@ function App(){
   const[apiStatus,setApiStatus]=useState({fmp:"none",massive:"none"});
   const[fetchSt,setFetchSt]=useState({loading:false,error:null,sources:[]});
   const[coName,setCoName]=useState("");
+  const[debugData,setDebugData]=useState(null);
+  const[showDebug,setShowDebug]=useState(false);
 
   // Load saved keys & auto-test on mount
   useEffect(()=>{
@@ -412,7 +414,7 @@ function App(){
     const srcs=[];let fd={};
     try{
       if(keys.fmp){
-        try{const d=await fetchFMP(params.ticker.trim(),keys.fmp);fd={...fd,...d};srcs.push("FMP");setApiStatus(p=>({...p,fmp:"connected"}));}
+        try{const res=await fetchFMP(params.ticker.trim(),keys.fmp);fd={...fd,...res.parsed};setDebugData(res.raw);srcs.push("FMP");setApiStatus(p=>({...p,fmp:"connected"}));}
         catch(e){console.warn("FMP:",e.message);setApiStatus(p=>({...p,fmp:"error"}));}
       }
       if(keys.massive){
@@ -596,6 +598,37 @@ function App(){
                 </div>
               )}
               <div style={{fontSize:9,color:"#3a3d45",lineHeight:1.5,padding:"8px 0",borderTop:"1px solid #1a1c22"}}>This is an educational tool, not financial advice. Models use simplified assumptions. Always conduct thorough due diligence.</div>
+
+              {/* Debug Panel */}
+              {debugData&&(
+                <>
+                  <button onClick={()=>setShowDebug(!showDebug)}
+                    style={{background:"#111318",border:"1px solid #2a2d35",borderRadius:6,padding:"8px 12px",color:"#f59e0b",fontFamily:mono,fontSize:10,cursor:"pointer",textAlign:"left"}}>
+                    {showDebug?"▾":"▸"} Debug: Raw API Responses
+                  </button>
+                  {showDebug&&(
+                    <div style={{background:"#0a0c10",border:"1px solid #1e2028",borderRadius:8,padding:12,fontSize:9,fontFamily:mono,color:"#8a8f98",maxHeight:400,overflow:"auto",lineHeight:1.6}}>
+                      {Object.entries(debugData).map(([endpoint,data])=>(
+                        <div key={endpoint} style={{marginBottom:12}}>
+                          <div style={{color:data?"#4a9eff":"#f87171",fontWeight:600,marginBottom:4}}>
+                            {endpoint}: {data?("✓ has data"):("✗ null/empty")}
+                          </div>
+                          {data&&typeof data==="object"&&(
+                            <div style={{paddingLeft:8,borderLeft:"2px solid #1e2028"}}>
+                              {Object.entries(data).filter(([k,v])=>v!==null&&v!==""&&k!=="description"&&k!=="image"&&k!=="website"&&k!=="address"&&k!=="city"&&k!=="state"&&k!=="zip"&&k!=="phone"&&k!=="cik"&&k!=="isin"&&k!=="cusip").slice(0,25).map(([field,value])=>(
+                                <div key={field}>
+                                  <span style={{color:"#565b64"}}>{field}:</span>{" "}
+                                  <span style={{color:typeof value==="number"&&value!==0?"#34d399":"#8a8f98"}}>{typeof value==="number"?value:String(value).substring(0,60)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </>):(
               <div style={{background:"#111318",border:"1px solid #2a2d35",borderRadius:12,padding:40,textAlign:"center",color:"#565b64"}}>No valid valuation models available for this input combination.</div>
             )}
