@@ -39,8 +39,8 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v2.0.0";
-const BUILD_DATE="2026-03-24 23:30";
+const APP_VERSION="v2.1.0";
+const BUILD_DATE="2026-03-24 23:45";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -64,8 +64,8 @@ function evaluate(p){
   if(n===0)return null;
   const a=1/n;for(const k in w)if(w[k]>0)w[k]=a;
   const bl=vD*w.DCF+vDdm*w.DDM+vPe*w.PE+vGr*w.Graham;
-  const d=((bl-p.price)/bl)*100;
-  return{models:{DCF:vD,DDM:vDdm,PE:vPe,Graham:vGr},weights:w,blended:bl,discount:d,marginOfSafety:d,dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED"};
+  const d=bl!==0?((bl-p.price)/bl)*100:0;
+  return{models:{DCF:vD,DDM:vDdm,PE:vPe,Graham:vGr},weights:w,blended:bl,discount:isFinite(d)?d:0,marginOfSafety:isFinite(d)?d:0,dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED"};
 }
 function sensTable(p){
   const o=[-.02,-.01,0,.01,.02];
@@ -74,7 +74,9 @@ function sensTable(p){
     const res=evaluate({...p,r,gFcf:gF,gTerminal:gT});return res?res.blended:0;
   }));
 }
-const fmt=v=>v>=1000?"$"+(v/1000).toFixed(1)+"k":"$"+v.toFixed(2);
+const safe=v=>(!isFinite(v)||isNaN(v))?0:v;
+const fmt=v=>{v=safe(v);return v>=1000?"$"+(v/1000).toFixed(1)+"k":"$"+v.toFixed(2);};
+const sfmt=v=>{v=safe(v);return Math.abs(v).toFixed(1);};
 const pct=v=>(v*100).toFixed(1)+"%";
 
 /* ── API Layer ── */
@@ -399,7 +401,7 @@ function ModelCard({name,value,weight,price,icon}){
         <span style={{fontFamily:mono,fontSize:10,background:on?"#1e2a3a":"#1a1c22",color:on?"#4a9eff":"#444",padding:"2px 7px",borderRadius:4}}>{(weight*100).toFixed(0)}%</span>
       </div>
       <div style={{fontFamily:mono,fontSize:20,fontWeight:700,color:!on?"#444":up?"#34d399":"#f87171"}}>{on?fmt(value):"N/A"}</div>
-      {on&&<div style={{fontFamily:mono,fontSize:10,marginTop:4,color:up?"#34d39988":"#f8717188"}}>{up?"▲":"▼"} {Math.abs(((value-price)/price)*100).toFixed(1)}% vs price</div>}
+      {on&&<div style={{fontFamily:mono,fontSize:10,marginTop:4,color:up?"#34d39988":"#f8717188"}}>{up?"▲":"▼"} {sfmt(((value-price)/price)*100)}% vs price</div>}
     </div>
   );
 }
@@ -441,6 +443,7 @@ function App(){
   const[coName,setCoName]=useState("");
   const[debugData,setDebugData]=useState(null);
   const[showDebug,setShowDebug]=useState(false);
+  const[hasFetched,setHasFetched]=useState(false);
 
   // Load saved keys & auto-test on mount
   useEffect(()=>{
@@ -499,6 +502,7 @@ function App(){
         sector:fd.sector||p.sector,peTarget:fd.peTarget||p.peTarget,
       }));
       if(fd.companyName)setCoName(fd.companyName);
+      setHasFetched(true);
       setFetchSt({loading:false,error:null,sources:srcs});
     }catch(e){setFetchSt({loading:false,error:e.message,sources:[]});}
   },[params.ticker,keys]);
@@ -588,7 +592,23 @@ function App(){
 
           {/* ── Right: Results ── */}
           <div style={{display:"flex",flexDirection:"column",gap:16}}>
-            {result?(<>
+            {!hasFetched?(
+              <div style={{background:"#111318",border:"1px solid #1e2028",borderRadius:12,padding:"48px 32px",textAlign:"center"}}>
+                <div style={{fontSize:40,marginBottom:16,opacity:0.3}}>◆</div>
+                <div style={{fontFamily:sans,fontSize:18,fontWeight:600,color:"#8a8f98",marginBottom:8}}>Enter a ticker to begin</div>
+                <div style={{fontSize:11,color:"#565b64",lineHeight:1.6,maxWidth:320,margin:"0 auto"}}>
+                  Type a stock symbol like AAPL, UNH, or RXRX and hit Fetch to pull live fundamentals and run the multi-model valuation.
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:24,maxWidth:360,margin:"24px auto 0"}}>
+                  {[{n:"DCF",i:"◆"},{n:"DDM",i:"◇"},{n:"P/E",i:"▣"},{n:"Graham",i:"△"}].map(m=>(
+                    <div key={m.n} style={{background:"#16181e",border:"1px solid #1e2028",borderRadius:8,padding:"10px 12px",textAlign:"left"}}>
+                      <span style={{fontFamily:mono,fontSize:9,letterSpacing:".1em",textTransform:"uppercase",color:"#565b64"}}>{m.i} {m.n}</span>
+                      <div style={{fontFamily:mono,fontSize:16,fontWeight:700,color:"#2a2d35",marginTop:4}}>—</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ):result?(<>
               {/* Verdict */}
               <div style={{background:result.verdict==="UNDERVALUED"?"linear-gradient(135deg,#0a2a1f,#112820)":"linear-gradient(135deg,#2a0f0f,#281414)",border:"1px solid "+(result.verdict==="UNDERVALUED"?"#1a4a35":"#4a1a1a"),borderRadius:12,padding:"20px 24px"}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
@@ -600,17 +620,17 @@ function App(){
                   <div style={{textAlign:"right"}}>
                     <div style={{fontSize:10,color:"#8a8f98",marginBottom:4}}>Market Price</div>
                     <div style={{fontFamily:sans,fontSize:22,fontWeight:600,color:"#e8eaed"}}>${params.price.toFixed(2)}</div>
-                    <div style={{fontSize:13,fontWeight:600,marginTop:4,color:result.discount>0?"#34d399":"#f87171"}}>
-                      {result.discount>0?"▲":"▼"} {Math.abs(result.discount).toFixed(1)}% {result.discount>0?"upside":"downside"}
+                    <div style={{fontSize:13,fontWeight:600,marginTop:4,color:safe(result.discount)>0?"#34d399":"#f87171"}}>
+                      {safe(result.discount)>0?"▲":"▼"} {sfmt(result.discount)}% {safe(result.discount)>0?"upside":"downside"}
                     </div>
                   </div>
                 </div>
                 <BarGauge price={params.price} blended={result.blended}/>
                 <div style={{marginTop:8,padding:"8px 12px",background:"#0c0e1266",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                   <span style={{fontSize:10,color:"#8a8f98"}}>Margin of Safety</span>
-                  <span style={{fontSize:13,fontWeight:600,color:result.marginOfSafety>=30?"#34d399":result.marginOfSafety>=15?"#fbbf24":"#f87171"}}>
-                    {result.marginOfSafety.toFixed(1)}%
-                    <span style={{fontSize:9,color:"#565b64",marginLeft:6}}>{result.marginOfSafety>=30?"Strong":result.marginOfSafety>=15?"Moderate":"Weak"}</span>
+                  <span style={{fontSize:13,fontWeight:600,color:safe(result.marginOfSafety)>=30?"#34d399":safe(result.marginOfSafety)>=15?"#fbbf24":"#f87171"}}>
+                    {sfmt(result.marginOfSafety)}%
+                    <span style={{fontSize:9,color:"#565b64",marginLeft:6}}>{safe(result.marginOfSafety)>=30?"Strong":safe(result.marginOfSafety)>=15?"Moderate":"Weak"}</span>
                   </span>
                 </div>
               </div>
