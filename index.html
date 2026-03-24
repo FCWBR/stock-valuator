@@ -39,8 +39,8 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v2.2.0";
-const BUILD_DATE="2026-03-25 00:00";
+const APP_VERSION="v2.2.1";
+const BUILD_DATE="2026-03-25 00:15";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -234,36 +234,48 @@ async function fetchMassive(ticker,key){
     // Income statement
     const is=fs.income_statement||{};
     const eps=val(is.basic_earnings_per_share)||val(is.diluted_earnings_per_share);
-    const netIncome=val(is.net_income_loss);
-    const revenue=val(is.revenues);
+    const netIncome=val(is.net_income_loss)||val(is.net_income_loss_attributable_to_parent);
+    const revenue=val(is.revenues)||val(is.revenue);
 
-    // Balance sheet
+    // Balance sheet — try many field name variants
     const bs=fs.balance_sheet||{};
-    const equity=val(bs.equity)||val(bs.stockholders_equity)||val(bs.equity_attributable_to_parent);
-    const shares=val(bs.common_stock_shares_outstanding)
-      ||val(is.basic_average_shares)||val(is.diluted_average_shares);
+    const equity=val(bs.equity)||val(bs.equity_attributable_to_parent)||val(bs.stockholders_equity)||0;
+    const shares=val(bs.common_stock_shares_outstanding)||val(is.basic_average_shares)
+      ||val(is.diluted_average_shares)||val(bs.weighted_average_shares)||0;
 
-    // Cash flow
+    // Cash flow — be specific about capex
     const cf=fs.cash_flow_statement||{};
-    const opCF=val(cf.net_cash_flow_from_operating_activities)||val(cf.net_cash_flow_from_operating_activities_continuing);
-    const investCF=val(cf.net_cash_flow_from_investing_activities)||val(cf.net_cash_flow_from_investing_activities_continuing);
-    const capex=Math.abs(investCF);
+    const opCF=val(cf.net_cash_flow_from_operating_activities)||val(cf.net_cash_flow_from_operating_activities_continuing)||0;
+    const investCF=val(cf.net_cash_flow_from_investing_activities)||val(cf.net_cash_flow_from_investing_activities_continuing)||0;
 
-    console.log("Massive parsed:",{eps,netIncome,equity,shares,opCF,investCF,revenue});
+    const parsed={eps,netIncome,equity,shares,opCF,investCF,revenue};
+    console.log("Massive parsed:",parsed);
+    // Store for debug panel
+    d.raw.massiveParsed=parsed;
+
+    // Also log all available field names for debugging
+    console.log("Massive IS fields:",Object.keys(is));
+    console.log("Massive BS fields:",Object.keys(bs));
+    console.log("Massive CF fields:",Object.keys(cf));
 
     // EPS — allow negative
     if(eps!==0)d.epsTtm=Math.round(eps*100)/100;
     else if(netIncome!==0&&shares>0)d.epsTtm=Math.round((netIncome/shares)*100)/100;
+    // Also compute from mktCap-derived shares if balance sheet shares are 0
+    else if(netIncome!==0&&d.price>0){
+      const snapShares=d.raw.snapshot?.market_cap?d.raw.snapshot.market_cap/d.price:0;
+      if(snapShares>0)d.epsTtm=Math.round((netIncome/snapShares)*100)/100;
+    }
 
-    // Book value per share — allow negative equity for stressed companies
+    // Book value per share
     if(equity!==0&&shares>0)d.bvps=Math.round((equity/shares)*100)/100;
 
-    // FCF per share
-    const fcf=opCF-capex;
+    // FCF per share — use opCF - |investCF| as proxy for FCF
+    const capex=Math.abs(investCF);
+    const fcf=opCF!==0?(opCF-capex):0;
     if(fcf!==0&&shares>0)d.fcf=Math.round((fcf/shares)*100)/100;
     else if(opCF!==0&&shares>0)d.fcf=Math.round((opCF/shares)*100)/100;
 
-    // Forward EPS — Massive doesn't have estimates, but store EPS for fallback
     d._shares=shares;
     d._netIncome=netIncome;
     d._revenue=revenue;
@@ -519,6 +531,7 @@ function App(){
           rawDebug.massiveFinancials=m.raw.financials;
           rawDebug.massiveFinancialsTTM=m.raw.financialsTTM;
           rawDebug.massiveFinancialsAnnual=m.raw.financialsAnnual;
+          rawDebug.massiveParsed=m.raw.massiveParsed||{note:"no financials found"};
           if(m.price>0){fd.price=m.price;}
           // Fill in any fields that FMP left at 0 — use explicit checks since negative values are valid (biotech etc)
           if(fd.epsTtm===0&&fd.epsTtm!==undefined&&m.epsTtm!==undefined)fd.epsTtm=m.epsTtm;
