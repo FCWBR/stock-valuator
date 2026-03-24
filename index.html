@@ -39,8 +39,8 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v2.1.0";
-const BUILD_DATE="2026-03-24 23:45";
+const APP_VERSION="v2.2.0";
+const BUILD_DATE="2026-03-25 00:00";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -104,32 +104,40 @@ async function fetchFMP(ticker,key){
   const b="https://financialmodelingprep.com/stable";
   const k="&apikey="+key;
 
-  const[prof,qt,inc,bal,cf,est]=await Promise.allSettled([
-    fetch(b+"/profile?symbol="+ticker+k).then(r=>r.json()),
-    fetch(b+"/quote?symbol="+ticker+k).then(r=>r.json()),
-    fetch(b+"/income-statement?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
-    fetch(b+"/balance-sheet-statement?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
-    fetch(b+"/cash-flow-statement?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
-    fetch(b+"/analyst-estimates?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
-  ]);
-
-  const extract=(r,label)=>{
-    if(r.status!=="fulfilled"||!r.value){console.log("FMP "+label+": failed");return null;}
-    const v=r.value;
-    if(Array.isArray(v)){console.log("FMP "+label+" (array["+v.length+"]):",v[0]);return v[0]||null;}
-    if(v["Error Message"]||v.message||v.error){console.log("FMP "+label+" error:",v["Error Message"]||v.message||v.error);return null;}
-    if(typeof v==="object"){console.log("FMP "+label+" (obj):",v);return v;}
-    return null;
+  const extractJSON=async(url,label)=>{
+    try{
+      const r=await fetch(url);const v=await r.json();
+      if(Array.isArray(v)&&v.length>0){console.log("FMP "+label+" ✓",v[0]);return v[0];}
+      if(Array.isArray(v)&&v.length===0){console.log("FMP "+label+": empty array");return null;}
+      if(v["Error Message"]||v.message||v.error){console.log("FMP "+label+" error:",v["Error Message"]||v.message||v.error);return null;}
+      if(typeof v==="object"&&v.symbol){console.log("FMP "+label+" ✓",v);return v;}
+      console.log("FMP "+label+": unexpected response",v);return null;
+    }catch(e){console.log("FMP "+label+" fetch failed:",e.message);return null;}
   };
 
-  const profile=extract(prof,"profile");
-  const quote=extract(qt,"quote");
-  const income=extract(inc,"income-statement");
-  const balance=extract(bal,"balance-sheet");
-  const cashflow=extract(cf,"cashflow");
-  const estimates=extract(est,"analyst-estimates");
+  // Profile & quote always
+  const[profile,quote]=await Promise.all([
+    extractJSON(b+"/profile?symbol="+ticker+k,"profile"),
+    extractJSON(b+"/quote?symbol="+ticker+k,"quote"),
+  ]);
 
   if(!profile&&!quote)throw new Error("No FMP data for "+ticker);
+
+  // Try annual statements first, then quarterly as fallback
+  let income=await extractJSON(b+"/income-statement?symbol="+ticker+"&period=annual&limit=1"+k,"income-annual");
+  let balance=await extractJSON(b+"/balance-sheet-statement?symbol="+ticker+"&period=annual&limit=1"+k,"balance-annual");
+  let cashflow=await extractJSON(b+"/cash-flow-statement?symbol="+ticker+"&period=annual&limit=1"+k,"cashflow-annual");
+
+  if(!income&&!balance&&!cashflow){
+    console.log("FMP: annual statements empty, trying quarterly...");
+    [income,balance,cashflow]=await Promise.all([
+      extractJSON(b+"/income-statement?symbol="+ticker+"&period=quarter&limit=4"+k,"income-quarterly"),
+      extractJSON(b+"/balance-sheet-statement?symbol="+ticker+"&period=quarter&limit=1"+k,"balance-quarterly"),
+      extractJSON(b+"/cash-flow-statement?symbol="+ticker+"&period=quarter&limit=4"+k,"cashflow-quarterly"),
+    ]);
+  }
+
+  const estimates=await extractJSON(b+"/analyst-estimates?symbol="+ticker+"&period=annual&limit=1"+k,"estimates");
 
   const num=v=>(typeof v==="number"?v:parseFloat(v))||0;
   const d={};
@@ -137,34 +145,31 @@ async function fetchFMP(ticker,key){
   // Price
   d.price=num(quote?.price)||num(profile?.price)||0;
 
-  // Shares outstanding — compute from marketCap / price as fallback
+  // Shares outstanding
   const mktCap=num(quote?.marketCap)||num(profile?.marketCap)||0;
   const shares=num(quote?.sharesOutstanding)
-    ||num(income?.weightedAverageShsOutDil)
-    ||num(income?.weightedAverageShsOut)
+    ||num(income?.weightedAverageShsOutDil)||num(income?.weightedAverageShsOut)
     ||(mktCap>0&&d.price>0?mktCap/d.price:0);
-  console.log("FMP shares:",shares,"(mktCap:",mktCap,")");
 
-  // EPS TTM — from quote, income statement, or compute from netIncome
-  const netIncome=num(income?.netIncome)||0;
-  d.epsTtm=num(quote?.eps)||num(income?.epsdiluted)||num(income?.epsDiluted)
-    ||(netIncome>0&&shares>0?netIncome/shares:0);
+  // EPS TTM — allow negative (biotech etc)
+  const netIncome=num(income?.netIncome);
+  const epsRaw=num(quote?.eps)||num(income?.epsdiluted)||num(income?.epsDiluted);
+  d.epsTtm=epsRaw!==0?epsRaw:(netIncome!==0&&shares>0?Math.round((netIncome/shares)*100)/100:0);
 
-  // P/E — from quote or compute
+  // P/E
   const rawPe=num(quote?.pe)||(d.price>0&&d.epsTtm>0?d.price/d.epsTtm:0);
   d.peTarget=rawPe>0?Math.round(rawPe):15;
 
   // Book Value Per Share
-  const equity=num(balance?.totalStockholdersEquity)||num(balance?.totalEquity)||0;
-  d.bvps=shares>0&&equity>0?Math.round((equity/shares)*100)/100:0;
+  const equity=num(balance?.totalStockholdersEquity)||num(balance?.totalEquity);
+  d.bvps=shares>0&&equity!==0?Math.round((equity/shares)*100)/100:0;
 
-  // FCF Per Share — from cash flow statement
-  const opCF=num(cashflow?.operatingCashFlow)||num(cashflow?.netCashProvidedByOperatingActivities)||0;
+  // FCF Per Share
+  const opCF=num(cashflow?.operatingCashFlow)||num(cashflow?.netCashProvidedByOperatingActivities);
   const capex=Math.abs(num(cashflow?.capitalExpenditure)||num(cashflow?.capitalExpenditures)||0);
   const fcfPre=num(cashflow?.freeCashFlow);
-  const fcfTotal=fcfPre!==0?fcfPre:(opCF>0?(opCF-capex):0);
+  const fcfTotal=fcfPre!==0?fcfPre:(opCF!==0?(opCF-capex):0);
   d.fcf=shares>0&&fcfTotal!==0?Math.round((fcfTotal/shares)*100)/100:0;
-  console.log("FMP cashflow:",{opCF,capex,fcfPre,fcfTotal,fcfPerShare:d.fcf});
 
   // Dividend Per Share
   d.dividend=num(profile?.lastDividend)||num(profile?.lastDiv)||0;
@@ -173,7 +178,7 @@ async function fetchFMP(ticker,key){
     if(shares>0&&divPaid>0)d.dividend=Math.round((divPaid/shares)*100)/100;
   }
 
-  // Forward EPS — from analyst estimates
+  // Forward EPS
   d.epsFwd=num(estimates?.epsAvg)||num(estimates?.estimatedEpsAvg)||num(estimates?.epsHigh)||0;
 
   // Sector & Company
@@ -182,14 +187,17 @@ async function fetchFMP(ticker,key){
     d.companyName=profile.companyName||profile.name||ticker;
   }
 
-  console.log("FMP final:",d);
+  // Track which statements we got for debug
+  d._statementsFound={income:!!income,balance:!!balance,cashflow:!!cashflow,estimates:!!estimates};
+  console.log("FMP final:",d,"(shares:",shares,")");
   return {parsed:d, raw:{profile,quote,income,balance,cashflow,estimates,shares}};
 }
 async function fetchMassive(ticker,key){
   const k="&apiKey="+key;
-  const[snap,fin]=await Promise.allSettled([
+  const[snap,fin,rat]=await Promise.allSettled([
     fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/"+ticker+"?apiKey="+key).then(r=>r.json()),
-    fetch("https://api.massive.com/vX/reference/financials?ticker="+ticker+"&timeframe=annual&limit=1&order=desc&sort=filing_date"+k).then(r=>r.json()),
+    fetch("https://api.massive.com/vX/reference/financials?ticker="+ticker+"&timeframe=annual&limit=1&order=desc&sort=period_of_report_date"+k).then(r=>r.json()),
+    fetch("https://api.massive.com/vX/reference/financials?ticker="+ticker+"&timeframe=trailing_twelve_months&limit=1"+k).then(r=>r.json()),
   ]);
 
   const d={raw:{}};
@@ -199,42 +207,66 @@ async function fetchMassive(ticker,key){
   d.raw.snapshot=snapData?.ticker||null;
   if(snapData?.ticker?.day?.c)d.price=snapData.ticker.day.c;
   else if(snapData?.ticker?.lastTrade?.p)d.price=snapData.ticker.lastTrade.p;
+  else if(snapData?.ticker?.prevDay?.c)d.price=snapData.ticker.prevDay.c;
 
-  // Fundamentals from financials endpoint
-  const finData=fin.status==="fulfilled"?fin.value:null;
-  const finResult=finData?.results?.[0];
+  // Helper to extract values from Massive financials (nested {value, unit, label} format)
+  const val=(obj)=>{
+    if(!obj)return 0;
+    if(typeof obj==="number")return obj;
+    if(typeof obj?.value==="number")return obj.value;
+    return parseFloat(obj?.value)||0;
+  };
+  const num=v=>(typeof v==="number"?v:parseFloat(v))||0;
+
+  // Try TTM first, then annual as fallback
+  const finTTM=rat.status==="fulfilled"?rat.value?.results?.[0]:null;
+  const finAnn=fin.status==="fulfilled"?fin.value?.results?.[0]:null;
+  const finResult=finTTM||finAnn;
   d.raw.financials=finResult||null;
+  d.raw.financialsTTM=finTTM||null;
+  d.raw.financialsAnnual=finAnn||null;
   console.log("Massive snapshot:",d.raw.snapshot);
-  console.log("Massive financials:",finResult);
+  console.log("Massive financials TTM:",finTTM?"✓":"✗","Annual:",finAnn?"✓":"✗");
 
   if(finResult?.financials){
     const fs=finResult.financials;
-    const val=(obj)=>obj?.value||0;
-    const num=v=>(typeof v==="number"?v:parseFloat(v))||0;
 
     // Income statement
     const is=fs.income_statement||{};
-    const eps=num(val(is.basic_earnings_per_share))||num(val(is.diluted_earnings_per_share))||0;
-    const netIncome=num(val(is.net_income_loss))||0;
+    const eps=val(is.basic_earnings_per_share)||val(is.diluted_earnings_per_share);
+    const netIncome=val(is.net_income_loss);
+    const revenue=val(is.revenues);
 
     // Balance sheet
     const bs=fs.balance_sheet||{};
-    const equity=num(val(bs.equity))||num(val(bs.stockholders_equity))||0;
-    const shares=num(val(bs.common_stock_shares_outstanding))||num(val(is.basic_average_shares))||num(val(is.diluted_average_shares))||0;
+    const equity=val(bs.equity)||val(bs.stockholders_equity)||val(bs.equity_attributable_to_parent);
+    const shares=val(bs.common_stock_shares_outstanding)
+      ||val(is.basic_average_shares)||val(is.diluted_average_shares);
 
     // Cash flow
     const cf=fs.cash_flow_statement||{};
-    const opCF=num(val(cf.net_cash_flow_from_operating_activities))||0;
-    const capex=Math.abs(num(val(cf.net_cash_flow_from_investing_activities_continuing))||0);
-    const fcf=opCF-(capex>0?capex:0);
+    const opCF=val(cf.net_cash_flow_from_operating_activities)||val(cf.net_cash_flow_from_operating_activities_continuing);
+    const investCF=val(cf.net_cash_flow_from_investing_activities)||val(cf.net_cash_flow_from_investing_activities_continuing);
+    const capex=Math.abs(investCF);
 
-    if(eps!==0)d.epsTtm=eps;
-    else if(netIncome!==0&&shares>0)d.epsTtm=netIncome/shares;
+    console.log("Massive parsed:",{eps,netIncome,equity,shares,opCF,investCF,revenue});
+
+    // EPS — allow negative
+    if(eps!==0)d.epsTtm=Math.round(eps*100)/100;
+    else if(netIncome!==0&&shares>0)d.epsTtm=Math.round((netIncome/shares)*100)/100;
+
+    // Book value per share — allow negative equity for stressed companies
     if(equity!==0&&shares>0)d.bvps=Math.round((equity/shares)*100)/100;
+
+    // FCF per share
+    const fcf=opCF-capex;
     if(fcf!==0&&shares>0)d.fcf=Math.round((fcf/shares)*100)/100;
     else if(opCF!==0&&shares>0)d.fcf=Math.round((opCF/shares)*100)/100;
 
+    // Forward EPS — Massive doesn't have estimates, but store EPS for fallback
     d._shares=shares;
+    d._netIncome=netIncome;
+    d._revenue=revenue;
   }
 
   return d;
@@ -485,11 +517,13 @@ function App(){
           const m=await fetchMassive(params.ticker.trim(),keys.massive);
           rawDebug.massiveSnapshot=m.raw.snapshot;
           rawDebug.massiveFinancials=m.raw.financials;
+          rawDebug.massiveFinancialsTTM=m.raw.financialsTTM;
+          rawDebug.massiveFinancialsAnnual=m.raw.financialsAnnual;
           if(m.price>0){fd.price=m.price;}
-          // Fill in any fields that FMP left at 0
-          if(!fd.epsTtm&&m.epsTtm)fd.epsTtm=m.epsTtm;
-          if(!fd.bvps&&m.bvps)fd.bvps=m.bvps;
-          if(!fd.fcf&&m.fcf)fd.fcf=m.fcf;
+          // Fill in any fields that FMP left at 0 — use explicit checks since negative values are valid (biotech etc)
+          if(fd.epsTtm===0&&fd.epsTtm!==undefined&&m.epsTtm!==undefined)fd.epsTtm=m.epsTtm;
+          if(fd.bvps===0&&m.bvps!==undefined)fd.bvps=m.bvps;
+          if(fd.fcf===0&&m.fcf!==undefined)fd.fcf=m.fcf;
           srcs.push("Massive");
           setApiStatus(p=>({...p,massive:"connected"}));
         }catch(e){console.warn("Massive:",e.message);setApiStatus(p=>({...p,massive:"error"}));}
