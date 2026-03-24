@@ -39,8 +39,8 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v1.5.2";
-const BUILD_DATE="2026-03-24";
+const APP_VERSION="v1.6.0";
+const BUILD_DATE="2026-03-24 23:05";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -102,13 +102,12 @@ async function fetchFMP(ticker,key){
   const b="https://financialmodelingprep.com/stable";
   const k="&apikey="+key;
 
-  // Use financial statement endpoints (free tier) instead of key-metrics (often premium)
   const[prof,qt,inc,bal,cf,est]=await Promise.allSettled([
     fetch(b+"/profile?symbol="+ticker+k).then(r=>r.json()),
     fetch(b+"/quote?symbol="+ticker+k).then(r=>r.json()),
     fetch(b+"/income-statement?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
     fetch(b+"/balance-sheet-statement?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
-    fetch(b+"/cashflow-statement?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
+    fetch(b+"/cash-flow-statement?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
     fetch(b+"/analyst-estimates?symbol="+ticker+"&period=annual&limit=1"+k).then(r=>r.json()),
   ]);
 
@@ -133,41 +132,47 @@ async function fetchFMP(ticker,key){
   const num=v=>(typeof v==="number"?v:parseFloat(v))||0;
   const d={};
 
-  // Price — from quote or profile
+  // Price
   d.price=num(quote?.price)||num(profile?.price)||0;
 
-  // EPS TTM — from quote, or compute from income statement
-  d.epsTtm=num(quote?.eps)||num(income?.epsdiluted)||num(income?.eps)||0;
-
-  // P/E — from quote
-  const rawPe=num(quote?.pe);
-  d.peTarget=rawPe>0?Math.round(rawPe):15;
-
-  // Shares outstanding — needed to compute per-share values
+  // Shares outstanding — compute from marketCap / price as fallback
+  const mktCap=num(quote?.marketCap)||num(profile?.marketCap)||0;
   const shares=num(quote?.sharesOutstanding)
     ||num(income?.weightedAverageShsOutDil)
     ||num(income?.weightedAverageShsOut)
-    ||num(profile?.mktCap&&profile?.price?profile.mktCap/profile.price:0);
+    ||(mktCap>0&&d.price>0?mktCap/d.price:0);
+  console.log("FMP shares:",shares,"(mktCap:",mktCap,")");
 
-  // Book Value Per Share — from balance sheet
+  // EPS TTM — from quote, income statement, or compute from netIncome
+  const netIncome=num(income?.netIncome)||0;
+  d.epsTtm=num(quote?.eps)||num(income?.epsdiluted)||num(income?.epsDiluted)
+    ||(netIncome>0&&shares>0?netIncome/shares:0);
+
+  // P/E — from quote or compute
+  const rawPe=num(quote?.pe)||(d.price>0&&d.epsTtm>0?d.price/d.epsTtm:0);
+  d.peTarget=rawPe>0?Math.round(rawPe):15;
+
+  // Book Value Per Share
   const equity=num(balance?.totalStockholdersEquity)||num(balance?.totalEquity)||0;
-  d.bvps=shares>0&&equity>0?equity/shares:0;
+  d.bvps=shares>0&&equity>0?Math.round((equity/shares)*100)/100:0;
 
-  // FCF Per Share — compute from operatingCashFlow - capitalExpenditure
+  // FCF Per Share — from cash flow statement
   const opCF=num(cashflow?.operatingCashFlow)||num(cashflow?.netCashProvidedByOperatingActivities)||0;
-  const capex=num(cashflow?.capitalExpenditure)||num(cashflow?.capitalExpenditures)||0;
-  // capex is typically negative in FMP; freeCashFlow may also be pre-computed
-  const fcfTotal=num(cashflow?.freeCashFlow)||(opCF>0?(opCF-Math.abs(capex)):0);
-  d.fcf=shares>0&&fcfTotal!==0?fcfTotal/shares:0;
+  const capex=Math.abs(num(cashflow?.capitalExpenditure)||num(cashflow?.capitalExpenditures)||0);
+  const fcfPre=num(cashflow?.freeCashFlow);
+  const fcfTotal=fcfPre!==0?fcfPre:(opCF>0?(opCF-capex):0);
+  d.fcf=shares>0&&fcfTotal!==0?Math.round((fcfTotal/shares)*100)/100:0;
+  console.log("FMP cashflow:",{opCF,capex,fcfPre,fcfTotal,fcfPerShare:d.fcf});
 
-  // Dividend Per Share — from profile, or compute from cashflow dividendsPaid
-  const profDiv=num(profile?.lastDiv)||num(profile?.lastDividend)||0;
-  const cfDivPaid=num(cashflow?.dividendsPaid)||num(cashflow?.commonStockDividendsPaid)||0;
-  const divPerShare=profDiv>0?profDiv:(shares>0&&cfDivPaid!==0?Math.abs(cfDivPaid)/shares:0);
-  d.dividend=divPerShare;
+  // Dividend Per Share
+  d.dividend=num(profile?.lastDividend)||num(profile?.lastDiv)||0;
+  if(d.dividend===0&&cashflow){
+    const divPaid=Math.abs(num(cashflow?.dividendsPaid)||num(cashflow?.commonStockDividendsPaid)||0);
+    if(shares>0&&divPaid>0)d.dividend=Math.round((divPaid/shares)*100)/100;
+  }
 
   // Forward EPS — from analyst estimates
-  d.epsFwd=num(estimates?.estimatedEpsAvg)||num(estimates?.estimatedEpsHigh)||0;
+  d.epsFwd=num(estimates?.epsAvg)||num(estimates?.estimatedEpsAvg)||num(estimates?.epsHigh)||0;
 
   // Sector & Company
   if(profile){
@@ -175,7 +180,7 @@ async function fetchFMP(ticker,key){
     d.companyName=profile.companyName||profile.name||ticker;
   }
 
-  console.log("FMP final:",d,"(shares:",shares,")");
+  console.log("FMP final:",d);
   return {parsed:d, raw:{profile,quote,income,balance,cashflow,estimates,shares}};
 }
 async function fetchMassivePrice(ticker,key){
