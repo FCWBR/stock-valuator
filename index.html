@@ -11,908 +11,539 @@
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
   <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #0c0e12; }
-    input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-    input[type=number] { -moz-appearance: textfield; appearance: textfield; }
-    ::selection { background: #4a9eff33; }
-    select { appearance: none; -webkit-appearance: none; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-    @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0c0e12}
+    input::-webkit-outer-spin-button,input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+    input[type=number]{-moz-appearance:textfield;appearance:textfield}
+    ::selection{background:#4a9eff33}
+    select{appearance:none;-webkit-appearance:none}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+    @keyframes slideUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
   </style>
 </head>
 <body>
-  <div id="root"></div>
-  <script type="text/babel">
-    const { useState, useMemo, useEffect, useCallback } = React;
+<div id="root"></div>
+<script type="text/babel">
+const{useState,useMemo,useEffect,useCallback}=React;
 
-    const SECTORS = [
-      "Technology", "Healthcare", "Financials", "Energy", "Industrials",
-      "Consumer Discretionary", "Consumer Staples", "Utilities", "Real Estate",
-      "Materials", "Communication Services", "Software", "Services"
-    ];
-    const SERVICE_SECTORS = ["technology", "healthcare", "services", "software"];
-    const SECTOR_MAP = {
-      "Technology": "Technology", "Healthcare": "Healthcare",
-      "Financial Services": "Financials", "Financials": "Financials",
-      "Energy": "Energy", "Industrials": "Industrials",
-      "Consumer Cyclical": "Consumer Discretionary", "Consumer Defensive": "Consumer Staples",
-      "Utilities": "Utilities", "Real Estate": "Real Estate",
-      "Basic Materials": "Materials", "Communication Services": "Communication Services",
-    };
+/* ── Constants ── */
+const SERVICE_SECTORS=["technology","healthcare","services","software"];
+const SECTOR_MAP={
+  "Technology":"Technology","Healthcare":"Healthcare",
+  "Financial Services":"Financials","Financials":"Financials",
+  "Energy":"Energy","Industrials":"Industrials",
+  "Consumer Cyclical":"Consumer Discretionary","Consumer Defensive":"Consumer Staples",
+  "Utilities":"Utilities","Real Estate":"Real Estate",
+  "Basic Materials":"Materials","Communication Services":"Communication Services",
+};
 
-    /* ── Valuation Models ── */
-    function calcDCF(fcf, gFcf, gTerminal, r, years = 5) {
-      if (r <= gTerminal) return { projectedValue: 0, terminalPV: 0, total: 0 };
-      let dcfValue = 0;
-      for (let t = 1; t <= years; t++) {
-        dcfValue += (fcf * Math.pow(1 + gFcf, t)) / Math.pow(1 + r, t);
-      }
-      const terminalFcf = fcf * Math.pow(1 + gFcf, years);
-      const tv = (terminalFcf * (1 + gTerminal)) / (r - gTerminal);
-      const pvT = tv / Math.pow(1 + r, years);
-      return { projectedValue: dcfValue, terminalPV: pvT, total: dcfValue + pvT };
-    }
-    function calcDDM(div, gDiv, r) {
-      if (div <= 0) return 0;
-      const g = Math.min(gDiv, r - 0.01);
-      return (div * (1 + g)) / (r - g);
-    }
-    function calcPE(epsFwd, peT, r) { return epsFwd <= 0 ? 0 : (epsFwd * peT) / (1 + r); }
-    function calcGraham(eps, bvps) { return (eps <= 0 || bvps <= 0) ? 0 : Math.sqrt(22.5 * eps * bvps); }
+/* ── Valuation Engine ── */
+function calcDCF(fcf,gFcf,gT,r,y=5){
+  if(r<=gT||fcf<=0)return{projectedValue:0,terminalPV:0,total:0};
+  let d=0;for(let t=1;t<=y;t++)d+=(fcf*Math.pow(1+gFcf,t))/Math.pow(1+r,t);
+  const tf=fcf*Math.pow(1+gFcf,y),tv=(tf*(1+gT))/(r-gT),pvT=tv/Math.pow(1+r,y);
+  return{projectedValue:d,terminalPV:pvT,total:d+pvT};
+}
+function calcDDM(div,gDiv,r){if(div<=0)return 0;const g=Math.min(gDiv,r-.01);return(div*(1+g))/(r-g);}
+function calcPE(eF,peT,r){return eF<=0?0:(eF*peT)/(1+r);}
+function calcGraham(e,b){return(e<=0||b<=0)?0:Math.sqrt(22.5*e*b);}
 
-    function evaluate(p) {
-      const dcfR = calcDCF(p.fcf, p.gFcf, p.gTerminal, p.r);
-      const vDcf = dcfR.total, vDdm = calcDDM(p.dividend, p.gDiv, p.r);
-      const vPe = calcPE(p.epsFwd, p.peTarget, p.r), vGr = calcGraham(p.epsTtm, p.bvps);
-      const w = { DCF: 0.25, DDM: 0.25, PE: 0.25, Graham: 0.25 };
-      if (p.dividend <= 0) w.DDM = 0;
-      if (p.bvps <= 0 || SERVICE_SECTORS.includes(p.sector.toLowerCase())) w.Graham = 0;
-      if (p.epsTtm <= 0) { w.Graham = 0; w.PE = 0; }
-      const n = Object.values(w).filter(v => v > 0).length;
-      if (n === 0) return null;
-      const a = 1.0 / n;
-      for (const k in w) { if (w[k] > 0) w[k] = a; }
-      const bl = vDcf*w.DCF + vDdm*w.DDM + vPe*w.PE + vGr*w.Graham;
-      const d = ((bl - p.price) / bl) * 100;
-      return { models: { DCF: vDcf, DDM: vDdm, PE: vPe, Graham: vGr }, weights: w, blended: bl, discount: d, marginOfSafety: d, dcfResult: dcfR, verdict: p.price < bl ? "UNDERVALUED" : "OVERVALUED" };
-    }
-    function sensitivityTable(p) {
-      const o = [-0.02, -0.01, 0, 0.01, 0.02];
-      return o.map(dr => o.map(dg => {
-        const r = Math.max(p.r + dr, 0.02), gF = p.gFcf + dg, gT = Math.min(p.gTerminal, r - 0.01);
-        const res = evaluate({ ...p, r, gFcf: gF, gTerminal: gT });
-        return res ? res.blended : 0;
-      }));
-    }
-    const fmt = v => v >= 1000 ? "$"+(v/1000).toFixed(1)+"k" : "$"+v.toFixed(2);
-    const pct = v => (v*100).toFixed(1)+"%";
+function evaluate(p){
+  const dcfR=calcDCF(p.fcf,p.gFcf,p.gTerminal,p.r);
+  const vD=dcfR.total,vDdm=calcDDM(p.dividend,p.gDiv,p.r),vPe=calcPE(p.epsFwd,p.peTarget,p.r),vGr=calcGraham(p.epsTtm,p.bvps);
+  const w={DCF:.25,DDM:.25,PE:.25,Graham:.25};
+  if(p.dividend<=0)w.DDM=0;
+  if(p.bvps<=0||SERVICE_SECTORS.includes((p.sector||"").toLowerCase()))w.Graham=0;
+  if(p.epsTtm<=0){w.Graham=0;w.PE=0;}
+  const n=Object.values(w).filter(v=>v>0).length;
+  if(n===0)return null;
+  const a=1/n;for(const k in w)if(w[k]>0)w[k]=a;
+  const bl=vD*w.DCF+vDdm*w.DDM+vPe*w.PE+vGr*w.Graham;
+  const d=((bl-p.price)/bl)*100;
+  return{models:{DCF:vD,DDM:vDdm,PE:vPe,Graham:vGr},weights:w,blended:bl,discount:d,marginOfSafety:d,dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED"};
+}
+function sensTable(p){
+  const o=[-.02,-.01,0,.01,.02];
+  return o.map(dr=>o.map(dg=>{
+    const r=Math.max(p.r+dr,.02),gF=p.gFcf+dg,gT=Math.min(p.gTerminal,r-.01);
+    const res=evaluate({...p,r,gFcf:gF,gTerminal:gT});return res?res.blended:0;
+  }));
+}
+const fmt=v=>v>=1000?"$"+(v/1000).toFixed(1)+"k":"$"+v.toFixed(2);
+const pct=v=>(v*100).toFixed(1)+"%";
 
-    /* ── API Fetching ── */
-    async function fetchFMP(ticker, key) {
-      const b = "https://financialmodelingprep.com/api/v3";
-      const [prof, met, est, qt] = await Promise.allSettled([
-        fetch(b+"/profile/"+ticker+"?apikey="+key).then(r=>r.json()),
-        fetch(b+"/key-metrics-ttm/"+ticker+"?apikey="+key).then(r=>r.json()),
-        fetch(b+"/analyst-estimates/"+ticker+"?limit=1&apikey="+key).then(r=>r.json()),
-        fetch(b+"/quote/"+ticker+"?apikey="+key).then(r=>r.json()),
-      ]);
-      const profile = prof.status==="fulfilled" && Array.isArray(prof.value) ? prof.value[0] : null;
-      const metrics = met.status==="fulfilled" && Array.isArray(met.value) ? met.value[0] : null;
-      const estimates = est.status==="fulfilled" && Array.isArray(est.value) ? est.value[0] : null;
-      const quote = qt.status==="fulfilled" && Array.isArray(qt.value) ? qt.value[0] : null;
-      if (!profile && !quote) throw new Error("FMP: no data for "+ticker);
-      const d = {};
-      if (quote) { d.price = quote.price||0; d.epsTtm = quote.eps||0; d.peTarget = quote.pe ? Math.round(quote.pe) : 15; }
-      if (profile) { if (!d.price) d.price = profile.price||0; d.dividend = profile.lastDiv||0; d.sector = SECTOR_MAP[profile.sector]||profile.sector||"Industrials"; d.companyName = profile.companyName||ticker; }
-      if (metrics) { d.bvps = metrics.bookValuePerShareTTM||0; d.fcf = metrics.freeCashFlowPerShareTTM||0; if (metrics.dividendPerShareTTM) d.dividend = metrics.dividendPerShareTTM; }
-      if (estimates) { d.epsFwd = estimates.estimatedEpsAvg||0; }
-      return d;
-    }
-    async function fetchMassivePrice(ticker, key) {
-      const res = await fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/"+ticker+"?apiKey="+key);
-      const d = await res.json();
-      if (d?.ticker?.day?.c) return { price: d.ticker.day.c };
-      if (d?.ticker?.lastTrade?.p) return { price: d.ticker.lastTrade.p };
-      return null;
-    }
+/* ── API Layer ── */
+async function testFMPKey(key){
+  const r=await fetch("https://financialmodelingprep.com/api/v3/profile/AAPL?apikey="+key);
+  const d=await r.json();
+  if(d["Error Message"]||d.message)throw new Error(d["Error Message"]||d.message);
+  if(!Array.isArray(d)||d.length===0)throw new Error("Invalid response");
+  return true;
+}
+async function testMassiveKey(key){
+  const r=await fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/AAPL?apiKey="+key);
+  const d=await r.json();
+  if(d.status==="ERROR"||d.error)throw new Error(d.error||d.message||"Invalid key");
+  if(!d.ticker)throw new Error("No data returned");
+  return true;
+}
 
-    /* ── Components ── */
-    function SettingsModal({ isOpen, onClose, keys, setKeys }) {
-      const [local, setLocal] = useState(keys);
-      useEffect(() => { if (isOpen) setLocal(keys); }, [isOpen, keys]);
-      if (!isOpen) return null;
-      const save = () => { setKeys(local); try { localStorage.setItem("sv_keys", JSON.stringify(local)); } catch(e) {} onClose(); };
+async function fetchFMP(ticker,key){
+  const b="https://financialmodelingprep.com/api/v3";
+  const[prof,met,est,qt]=await Promise.allSettled([
+    fetch(b+"/profile/"+ticker+"?apikey="+key).then(r=>r.json()),
+    fetch(b+"/key-metrics-ttm/"+ticker+"?apikey="+key).then(r=>r.json()),
+    fetch(b+"/analyst-estimates/"+ticker+"?limit=1&apikey="+key).then(r=>r.json()),
+    fetch(b+"/quote/"+ticker+"?apikey="+key).then(r=>r.json()),
+  ]);
+  const profile=prof.status==="fulfilled"&&Array.isArray(prof.value)?prof.value[0]:null;
+  const metrics=met.status==="fulfilled"&&Array.isArray(met.value)?met.value[0]:null;
+  const estimates=est.status==="fulfilled"&&Array.isArray(est.value)?est.value[0]:null;
+  const quote=qt.status==="fulfilled"&&Array.isArray(qt.value)?qt.value[0]:null;
+  if(!profile&&!quote)throw new Error("No FMP data for "+ticker);
+  const d={};
+  if(quote){d.price=quote.price||0;d.epsTtm=quote.eps||0;d.peTarget=quote.pe?Math.round(quote.pe):15;}
+  if(profile){if(!d.price)d.price=profile.price||0;d.dividend=profile.lastDiv||0;d.sector=SECTOR_MAP[profile.sector]||profile.sector||"Industrials";d.companyName=profile.companyName||ticker;d.industry=profile.industry||"";}
+  if(metrics){d.bvps=metrics.bookValuePerShareTTM||0;d.fcf=metrics.freeCashFlowPerShareTTM||0;if(metrics.dividendPerShareTTM)d.dividend=metrics.dividendPerShareTTM;}
+  if(estimates){d.epsFwd=estimates.estimatedEpsAvg||0;}
+  return d;
+}
+async function fetchMassivePrice(ticker,key){
+  const r=await fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/"+ticker+"?apiKey="+key);
+  const d=await r.json();
+  if(d?.ticker?.day?.c)return{price:d.ticker.day.c};
+  if(d?.ticker?.lastTrade?.p)return{price:d.ticker.lastTrade.p};
+  return null;
+}
 
-      return (
-        <div style={{ position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,0.7)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn 0.15s ease" }} onClick={onClose}>
-          <div onClick={e=>e.stopPropagation()} style={{ background:"#111318",border:"1px solid #2a2d35",borderRadius:14,padding:28,width:420,maxWidth:"90vw",animation:"slideUp 0.2s ease" }}>
-            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20 }}>
-              <h2 style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:18,fontWeight:700,color:"#e8eaed" }}>API Settings</h2>
-              <button onClick={onClose} style={{ background:"none",border:"none",color:"#565b64",fontSize:20,cursor:"pointer",padding:4 }}>✕</button>
-            </div>
-            <div style={{ display:"flex",flexDirection:"column",gap:18 }}>
-              <div>
-                <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6 }}>
-                  <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Financial Modeling Prep</span>
-                  <span style={{ fontSize:9,background:"#1a2a1f",color:"#34d399",padding:"2px 6px",borderRadius:3 }}>Fundamentals</span>
-                </div>
-                <input type="password" value={local.fmp} placeholder="Your FMP API key"
-                  onChange={e=>setLocal(l=>({...l,fmp:e.target.value}))}
-                  style={{ width:"100%",background:"#0c0e12",border:"1px solid #2a2d35",borderRadius:6,padding:"10px 12px",color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:12,outline:"none" }} />
-                <div style={{ fontSize:9,color:"#565b64",marginTop:4 }}>EPS, book value, FCF, dividends, sector, forward estimates · 250 calls/day free</div>
-              </div>
-              <div>
-                <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6 }}>
-                  <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Massive (Polygon.io)</span>
-                  <span style={{ fontSize:9,background:"#1a1e2a",color:"#818cf8",padding:"2px 6px",borderRadius:3 }}>Real-time Price</span>
-                </div>
-                <input type="password" value={local.massive} placeholder="Your Massive API key"
-                  onChange={e=>setLocal(l=>({...l,massive:e.target.value}))}
-                  style={{ width:"100%",background:"#0c0e12",border:"1px solid #2a2d35",borderRadius:6,padding:"10px 12px",color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:12,outline:"none" }} />
-                <div style={{ fontSize:9,color:"#565b64",marginTop:4 }}>Real-time / delayed stock price snapshot · Optional — FMP also provides price</div>
-              </div>
-            </div>
-            <div style={{ display:"flex",gap:10,marginTop:24 }}>
-              <button onClick={save} style={{ flex:1,background:"#4a9eff",border:"none",borderRadius:8,padding:"10px 0",color:"#fff",fontFamily:"'Space Grotesk',sans-serif",fontSize:13,fontWeight:600,cursor:"pointer" }}>Save Keys</button>
-              <button onClick={onClose} style={{ flex:1,background:"#1e2028",border:"1px solid #2a2d35",borderRadius:8,padding:"10px 0",color:"#8a8f98",fontFamily:"'Space Grotesk',sans-serif",fontSize:13,fontWeight:500,cursor:"pointer" }}>Cancel</button>
-            </div>
-            <div style={{ fontSize:9,color:"#3a3d45",marginTop:14,lineHeight:1.5,textAlign:"center" }}>
-              Keys are stored in your browser's localStorage and only sent to the respective API providers.
-            </div>
-          </div>
+/* ── Shared Styles ── */
+const mono="'JetBrains Mono','Fira Code',monospace";
+const sans="'Space Grotesk',sans-serif";
+
+/* ── Components ── */
+function Spinner({size=14,color="#4a9eff"}){
+  return <span style={{display:"inline-block",width:size,height:size,border:"2px solid #2a2d35",borderTopColor:color,borderRadius:"50%",animation:"spin .6s linear infinite"}}/>;
+}
+
+function StatusBar({apiStatus}){
+  const fmp=apiStatus.fmp;
+  const massive=apiStatus.massive;
+  return(
+    <div style={{background:"#0a0c10",borderBottom:"1px solid #1a1c22",padding:"6px 20px",display:"flex",alignItems:"center",justifyContent:"center",gap:20,fontSize:10,fontFamily:mono}}>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <div style={{width:6,height:6,borderRadius:"50%",background:fmp==="connected"?"#34d399":fmp==="error"?"#f87171":"#3a3d45",boxShadow:fmp==="connected"?"0 0 6px #34d39966":"none"}}/>
+        <span style={{color:fmp==="connected"?"#34d399":fmp==="error"?"#f87171":"#3a3d45"}}>FMP</span>
+        <span style={{color:"#2a2d35"}}>·</span>
+        <span style={{color:"#565b64"}}>{fmp==="connected"?"Connected":fmp==="error"?"Failed":"Not configured"}</span>
+      </div>
+      <div style={{width:1,height:12,background:"#1e2028"}}/>
+      <div style={{display:"flex",alignItems:"center",gap:6}}>
+        <div style={{width:6,height:6,borderRadius:"50%",background:massive==="connected"?"#34d399":massive==="error"?"#f87171":"#3a3d45",boxShadow:massive==="connected"?"0 0 6px #34d39966":"none"}}/>
+        <span style={{color:massive==="connected"?"#34d399":massive==="error"?"#f87171":"#3a3d45"}}>Massive</span>
+        <span style={{color:"#2a2d35"}}>·</span>
+        <span style={{color:"#565b64"}}>{massive==="connected"?"Connected":massive==="error"?"Failed":"Not configured"}</span>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({isOpen,onClose,keys,setKeys,apiStatus,setApiStatus}){
+  const[local,setLocal]=useState(keys);
+  const[testing,setTesting]=useState({fmp:false,massive:false});
+  const[testMsg,setTestMsg]=useState({fmp:null,massive:null});
+
+  useEffect(()=>{if(isOpen){setLocal(keys);setTestMsg({fmp:null,massive:null});}}, [isOpen,keys]);
+  if(!isOpen)return null;
+
+  const save=()=>{
+    setKeys(local);
+    try{localStorage.setItem("sv_keys",JSON.stringify(local));}catch(e){}
+    // Reset status for keys that were removed
+    setApiStatus(prev=>({
+      fmp:local.fmp?prev.fmp:"none",
+      massive:local.massive?prev.massive:"none"
+    }));
+    onClose();
+  };
+
+  const testKey=async(provider)=>{
+    const key=local[provider];
+    if(!key.trim()){setTestMsg(p=>({...p,[provider]:{ok:false,msg:"Enter a key first"}}));return;}
+    setTesting(p=>({...p,[provider]:true}));
+    setTestMsg(p=>({...p,[provider]:null}));
+    try{
+      if(provider==="fmp")await testFMPKey(key);
+      else await testMassiveKey(key);
+      setTestMsg(p=>({...p,[provider]:{ok:true,msg:"Connected successfully"}}));
+      setApiStatus(p=>({...p,[provider]:"connected"}));
+    }catch(e){
+      setTestMsg(p=>({...p,[provider]:{ok:false,msg:e.message||"Connection failed"}}));
+      setApiStatus(p=>({...p,[provider]:"error"}));
+    }
+    setTesting(p=>({...p,[provider]:false}));
+  };
+
+  const inputStyle={width:"100%",background:"#0c0e12",border:"1px solid #2a2d35",borderRadius:6,padding:"10px 12px",color:"#e8eaed",fontFamily:mono,fontSize:12,outline:"none"};
+  const labelStyle={fontFamily:mono,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98"};
+
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,.7)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn .15s ease"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"#111318",border:"1px solid #2a2d35",borderRadius:14,padding:28,width:460,maxWidth:"92vw",animation:"slideUp .2s ease"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+          <h2 style={{fontFamily:sans,fontSize:18,fontWeight:700,color:"#e8eaed"}}>API Settings</h2>
+          <button onClick={onClose} style={{background:"none",border:"none",color:"#565b64",fontSize:20,cursor:"pointer",padding:4}}>✕</button>
         </div>
-      );
-    }
 
-    function InputField({ label, value, onChange, suffix, step="0.01", min, tooltip }) {
-      const [f,sF]=useState(false);
-      return (
-        <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
-          <label style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98",fontWeight:500 }}>
-            {label}{tooltip && <span style={{ marginLeft:4,color:"#565b64",cursor:"help" }} title={tooltip}>ⓘ</span>}
-          </label>
-          <div style={{ position:"relative" }}>
-            <input type="number" value={value} step={step} min={min}
-              onChange={e=>onChange(parseFloat(e.target.value)||0)}
-              onFocus={()=>sF(true)} onBlur={()=>sF(false)}
-              style={{ width:"100%",boxSizing:"border-box",background:"#13151a",border:"1px solid "+(f?"#4a9eff":"#2a2d35"),borderRadius:6,padding:"8px 10px",paddingRight:suffix?32:10,color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:13,outline:"none",transition:"border-color 0.15s" }} />
-            {suffix && <span style={{ position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:"#565b64",fontSize:11,fontFamily:"'JetBrains Mono',monospace" }}>{suffix}</span>}
-          </div>
-        </div>
-      );
-    }
-
-    function ModelCard({ name, value, weight, price, icon }) {
-      const on=weight>0, up=value>price&&on;
-      return (
-        <div style={{ background:on?"#16181e":"#111318",border:"1px solid "+(on?"#2a2d35":"#1e2028"),borderRadius:10,padding:"14px 16px",opacity:on?1:0.4,transition:"all 0.3s ease" }}>
-          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-            <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.1em",textTransform:"uppercase",color:"#8a8f98" }}>{icon} {name}</span>
-            <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,background:on?"#1e2a3a":"#1a1c22",color:on?"#4a9eff":"#444",padding:"2px 7px",borderRadius:4 }}>{(weight*100).toFixed(0)}%</span>
-          </div>
-          <div style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:20,fontWeight:700,color:!on?"#444":up?"#34d399":"#f87171" }}>{on?fmt(value):"N/A"}</div>
-          {on && <div style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,marginTop:4,color:up?"#34d39988":"#f8717188" }}>{up?"▲":"▼"} {Math.abs(((value-price)/price)*100).toFixed(1)}% vs price</div>}
-        </div>
-      );
-    }
-
-    function BarGauge({ price, blended }) {
-      const mn=Math.min(price,blended)*0.7, mx=Math.max(price,blended)*1.3, rng=mx-mn||1;
-      const pp=Math.max(2,Math.min(98,((price-mn)/rng)*100)), bp=Math.max(2,Math.min(98,((blended-mn)/rng)*100));
-      const u=price<blended;
-      return (
-        <div style={{ position:"relative",height:40,margin:"16px 0 8px" }}>
-          <div style={{ position:"absolute",top:16,left:0,right:0,height:8,background:"#1e2028",borderRadius:4,overflow:"hidden" }}>
-            <div style={{ position:"absolute",left:Math.min(pp,bp)+"%",width:Math.abs(bp-pp)+"%",height:"100%",background:u?"linear-gradient(90deg,#f8717144,#34d39944)":"linear-gradient(90deg,#34d39944,#f8717144)",borderRadius:4 }} />
-          </div>
-          <div style={{ position:"absolute",left:pp+"%",top:0,transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center" }}>
-            <span style={{ fontSize:8,fontFamily:"'JetBrains Mono',monospace",color:"#f87171",whiteSpace:"nowrap" }}>MKT</span>
-            <div style={{ width:2,height:22,background:"#f87171",borderRadius:1 }} />
-          </div>
-          <div style={{ position:"absolute",left:bp+"%",top:0,transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center" }}>
-            <span style={{ fontSize:8,fontFamily:"'JetBrains Mono',monospace",color:"#34d399",whiteSpace:"nowrap" }}>IV</span>
-            <div style={{ width:2,height:22,background:"#34d399",borderRadius:1 }} />
-          </div>
-        </div>
-      );
-    }
-
-    function Spinner() {
-      return <span style={{ display:"inline-block",width:14,height:14,border:"2px solid #2a2d35",borderTopColor:"#4a9eff",borderRadius:"50%",animation:"spin 0.6s linear infinite" }} />;
-    }
-
-    /* ── Main App ── */
-    function StockValuator() {
-      const [params, setParams] = useState({
-        ticker:"UNH", price:269.35, epsTtm:13.23, epsFwd:17.75,
-        bvps:106.0, dividend:8.84, gDiv:0.06, fcf:16.0,
-        gFcf:0.06, gTerminal:0.025, r:0.09, peTarget:17.0, sector:"Healthcare"
-      });
-      const [showSens, setShowSens] = useState(false);
-      const [sensHov, setSensHov] = useState(false);
-      const [settingsOpen, setSettingsOpen] = useState(false);
-      const [keys, setKeys] = useState({ fmp:"", massive:"" });
-      const [status, setStatus] = useState({ loading:false, error:null, sources:[] });
-      const [coName, setCoName] = useState("");
-
-      useEffect(() => { try { const s=localStorage.getItem("sv_keys"); if(s) setKeys(JSON.parse(s)); } catch(e){} }, []);
-
-      const set = k => v => setParams(p=>({...p,[k]:v}));
-      const result = useMemo(()=>evaluate(params),[params]);
-      const sensData = useMemo(()=>showSens?sensitivityTable(params):null,[params,showSens]);
-      const hasKeys = keys.fmp || keys.massive;
-
-      const fetchData = useCallback(async () => {
-        if (!params.ticker.trim()) return;
-        if (!keys.fmp && !keys.massive) { setSettingsOpen(true); return; }
-        setStatus({ loading:true, error:null, sources:[] });
-        const srcs = [];
-        let fd = {};
-        try {
-          if (keys.fmp) {
-            try { const d = await fetchFMP(params.ticker.trim(), keys.fmp); fd={...fd,...d}; srcs.push("FMP"); } catch(e) { console.warn("FMP:",e.message); }
-          }
-          if (keys.massive) {
-            try { const d = await fetchMassivePrice(params.ticker.trim(), keys.massive); if(d?.price>0){fd.price=d.price;srcs.push("Massive");} } catch(e) { console.warn("Massive:",e.message); }
-          }
-          if (srcs.length===0) throw new Error("All API calls failed. Check your keys and ticker symbol.");
-          setParams(p=>({...p,
-            price:fd.price||p.price, epsTtm:fd.epsTtm??p.epsTtm, epsFwd:fd.epsFwd??p.epsFwd,
-            bvps:fd.bvps??p.bvps, dividend:fd.dividend??p.dividend, fcf:fd.fcf??p.fcf,
-            sector:fd.sector||p.sector, peTarget:fd.peTarget||p.peTarget,
-          }));
-          if(fd.companyName) setCoName(fd.companyName);
-          setStatus({ loading:false, error:null, sources:srcs });
-        } catch(e) { setStatus({ loading:false, error:e.message, sources:[] }); }
-      }, [params.ticker, keys]);
-
-      const onTickerKey = e => { if(e.key==="Enter") fetchData(); };
-
-      return (
-        <div style={{ minHeight:"100vh",background:"#0c0e12",color:"#e8eaed",fontFamily:"'JetBrains Mono','Fira Code',monospace",padding:"24px 20px" }}>
-          <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} keys={keys} setKeys={setKeys} />
-
-          <div style={{ maxWidth:920,margin:"0 auto" }}>
-            {/* Header */}
-            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4 }}>
-              <div>
-                <div style={{ display:"flex",alignItems:"baseline",gap:12 }}>
-                  <h1 style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:22,fontWeight:700,color:"#e8eaed",letterSpacing:"-0.02em" }}>Intrinsic Value</h1>
-                  <span style={{ fontSize:10,color:"#565b64",letterSpacing:"0.08em" }}>MULTI-MODEL</span>
-                </div>
-                <p style={{ fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5 }}>DCF · Dividend Discount · P/E Multiple · Graham Number — blended with conditional weighting</p>
-              </div>
-              <button onClick={()=>setSettingsOpen(true)} title="API Settings"
-                style={{ background:hasKeys?"#111318":"#1e2028",border:"1px solid "+(hasKeys?"#2a2d35":"#4a9eff44"),borderRadius:8,padding:"8px 12px",color:hasKeys?"#8a8f98":"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:6,transition:"all 0.15s" }}>
-                <span style={{ fontSize:14 }}>⚙</span>{hasKeys?"API Keys":"Set API Keys"}
+        <div style={{display:"flex",flexDirection:"column",gap:20}}>
+          {/* FMP */}
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+              <span style={labelStyle}>Financial Modeling Prep</span>
+              <span style={{fontSize:9,background:"#1a2a1f",color:"#34d399",padding:"2px 6px",borderRadius:3}}>Fundamentals</span>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <input type="password" value={local.fmp} placeholder="Your FMP API key"
+                onChange={e=>setLocal(l=>({...l,fmp:e.target.value}))}
+                style={{...inputStyle,flex:1}}/>
+              <button onClick={()=>testKey("fmp")} disabled={testing.fmp}
+                style={{background:"#1a2a1f",border:"1px solid #1a4a35",borderRadius:6,padding:"0 14px",color:"#34d399",fontFamily:mono,fontSize:10,fontWeight:600,cursor:testing.fmp?"wait":"pointer",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6}}>
+                {testing.fmp?<Spinner size={10} color="#34d399"/>:null}{testing.fmp?"Testing...":"Test"}
               </button>
             </div>
+            {testMsg.fmp&&<div style={{fontSize:9,color:testMsg.fmp.ok?"#34d399":"#f87171",marginTop:5,display:"flex",alignItems:"center",gap:4}}>
+              {testMsg.fmp.ok?"✓":"✗"} {testMsg.fmp.msg}
+            </div>}
+            <div style={{fontSize:9,color:"#565b64",marginTop:4}}>EPS, book value, FCF, dividends, sector, forward estimates · free tier: 250 calls/day</div>
+          </div>
 
-            <div style={{ height:20 }} />
-
-            <div style={{ display:"grid",gridTemplateColumns:"320px 1fr",gap:24,alignItems:"start" }}>
-              {/* ── Input Panel ── */}
-              <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:12,padding:20,display:"flex",flexDirection:"column",gap:18 }}>
-                {/* Ticker + Sector */}
-                <div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
-                      <label style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Ticker</label>
-                      <input type="text" value={params.ticker}
-                        onChange={e=>setParams(p=>({...p,ticker:e.target.value.toUpperCase()}))}
-                        onKeyDown={onTickerKey}
-                        placeholder="e.g. AAPL"
-                        style={{ background:"#13151a",border:"1px solid #2a2d35",borderRadius:6,padding:"8px 10px",color:"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:15,fontWeight:700,outline:"none",width:"100%",boxSizing:"border-box" }} />
-                    </div>
-                    <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
-                      <label style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Sector</label>
-                      <select value={params.sector} onChange={e=>setParams(p=>({...p,sector:e.target.value}))}
-                        style={{ background:"#13151a",border:"1px solid #2a2d35",borderRadius:6,padding:"8px 10px",color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:11,outline:"none",width:"100%",boxSizing:"border-box",cursor:"pointer" }}>
-                        {SECTORS.map(s=><option key={s} value={s}>{s}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                  {/* Fetch Button */}
-                  <button onClick={fetchData} disabled={status.loading}
-                    style={{ marginTop:10,width:"100%",background:status.loading?"#1e2028":"linear-gradient(135deg,#1a2a3a,#162030)",border:"1px solid "+(status.loading?"#2a2d35":"#2a4a6a"),borderRadius:7,padding:"9px 0",color:status.loading?"#565b64":"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:11,fontWeight:600,cursor:status.loading?"wait":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,transition:"all 0.15s" }}>
-                    {status.loading?<><Spinner/> Fetching...</>:"⟳ Fetch Live Data"}
-                  </button>
-                  {status.error && <div style={{ fontSize:9,color:"#f87171",marginTop:6,lineHeight:1.4 }}>{status.error}</div>}
-                  {status.sources.length>0 && !status.error && (
-                    <div style={{ fontSize:9,color:"#34d399",marginTop:6,display:"flex",alignItems:"center",gap:4 }}>
-                      ✓ Loaded from {status.sources.join(" + ")}{coName && <span style={{ color:"#565b64" }}>· {coName}</span>}
-                    </div>
-                  )}
-                  {!hasKeys && !status.loading && <div style={{ fontSize:9,color:"#565b64",marginTop:6 }}>Set API keys via ⚙ to enable live data</div>}
-                </div>
-                <div style={{ height:1,background:"#1e2028" }} />
-                <div>
-                  <div style={{ fontSize:9,color:"#565b64",letterSpacing:"0.12em",marginBottom:10,textTransform:"uppercase" }}>Price & Earnings</div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <InputField label="Market Price" value={params.price} onChange={set("price")} suffix="$" />
-                    <InputField label="EPS (TTM)" value={params.epsTtm} onChange={set("epsTtm")} suffix="$" tooltip="Trailing 12-month earnings per share" />
-                    <InputField label="EPS (Fwd)" value={params.epsFwd} onChange={set("epsFwd")} suffix="$" tooltip="Forward consensus estimate" />
-                    <InputField label="Book Value/Sh" value={params.bvps} onChange={set("bvps")} suffix="$" />
-                  </div>
-                </div>
-                <div style={{ height:1,background:"#1e2028" }} />
-                <div>
-                  <div style={{ fontSize:9,color:"#565b64",letterSpacing:"0.12em",marginBottom:10,textTransform:"uppercase" }}>Cash Flow & Dividends</div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <InputField label="FCF / Share" value={params.fcf} onChange={set("fcf")} suffix="$" tooltip="Free cash flow per share" />
-                    <InputField label="FCF Growth" value={params.gFcf} onChange={set("gFcf")} step="0.005" tooltip="Annual FCF growth rate (decimal)" />
-                    <InputField label="Dividend / Sh" value={params.dividend} onChange={set("dividend")} suffix="$" />
-                    <InputField label="Div Growth" value={params.gDiv} onChange={set("gDiv")} step="0.005" />
-                  </div>
-                </div>
-                <div style={{ height:1,background:"#1e2028" }} />
-                <div>
-                  <div style={{ fontSize:9,color:"#565b64",letterSpacing:"0.12em",marginBottom:10,textTransform:"uppercase" }}>Model Parameters</div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <InputField label="Discount Rate" value={params.r} onChange={set("r")} step="0.005" min="0.01" tooltip="Required rate of return (WACC)" />
-                    <InputField label="Terminal Growth" value={params.gTerminal} onChange={set("gTerminal")} step="0.005" tooltip="Long-term perpetuity growth" />
-                    <InputField label="Target P/E" value={params.peTarget} onChange={set("peTarget")} step="0.5" tooltip="Fair P/E multiple for sector" />
-                  </div>
-                </div>
-              </div>
-
-              {/* ── Results Panel ── */}
-              <div style={{ display:"flex",flexDirection:"column",gap:16 }}>
-                {result ? (<>
-                  {/* Verdict */}
-                  <div style={{ background:result.verdict==="UNDERVALUED"?"linear-gradient(135deg,#0a2a1f,#112820)":"linear-gradient(135deg,#2a0f0f,#281414)",border:"1px solid "+(result.verdict==="UNDERVALUED"?"#1a4a35":"#4a1a1a"),borderRadius:12,padding:"20px 24px" }}>
-                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start" }}>
-                      <div>
-                        <div style={{ fontSize:10,letterSpacing:"0.12em",textTransform:"uppercase",color:result.verdict==="UNDERVALUED"?"#34d399":"#f87171",marginBottom:6,fontWeight:600 }}>{params.ticker} · {result.verdict}</div>
-                        <div style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:36,fontWeight:700,color:result.verdict==="UNDERVALUED"?"#34d399":"#f87171" }}>{fmt(result.blended)}</div>
-                        <div style={{ fontSize:11,color:"#8a8f98",marginTop:4 }}>Blended Intrinsic Value</div>
-                      </div>
-                      <div style={{ textAlign:"right" }}>
-                        <div style={{ fontSize:10,color:"#8a8f98",marginBottom:4 }}>Market Price</div>
-                        <div style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:22,fontWeight:600,color:"#e8eaed" }}>${params.price.toFixed(2)}</div>
-                        <div style={{ fontSize:13,fontWeight:600,marginTop:4,color:result.discount>0?"#34d399":"#f87171" }}>
-                          {result.discount>0?"▲":"▼"} {Math.abs(result.discount).toFixed(1)}% {result.discount>0?"upside":"downside"}
-                        </div>
-                      </div>
-                    </div>
-                    <BarGauge price={params.price} blended={result.blended} />
-                    <div style={{ marginTop:8,padding:"8px 12px",background:"#0c0e1266",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center" }}>
-                      <span style={{ fontSize:10,color:"#8a8f98" }}>Margin of Safety</span>
-                      <span style={{ fontSize:13,fontWeight:600,color:result.marginOfSafety>=30?"#34d399":result.marginOfSafety>=15?"#fbbf24":"#f87171" }}>
-                        {result.marginOfSafety.toFixed(1)}%
-                        <span style={{ fontSize:9,color:"#565b64",marginLeft:6 }}>{result.marginOfSafety>=30?"Strong":result.marginOfSafety>=15?"Moderate":"Weak"}</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Models */}
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <ModelCard name="DCF" value={result.models.DCF} weight={result.weights.DCF} price={params.price} icon="◆" />
-                    <ModelCard name="DDM" value={result.models.DDM} weight={result.weights.DDM} price={params.price} icon="◇" />
-                    <ModelCard name="P/E Multiple" value={result.models.PE} weight={result.weights.PE} price={params.price} icon="▣" />
-                    <ModelCard name="Graham №" value={result.models.Graham} weight={result.weights.Graham} price={params.price} icon="△" />
-                  </div>
-
-                  {/* DCF Breakdown */}
-                  <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px" }}>
-                    <div style={{ fontSize:10,letterSpacing:"0.1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:10 }}>DCF Breakdown</div>
-                    <div style={{ display:"flex",gap:20 }}>
-                      <div><div style={{ fontSize:9,color:"#565b64" }}>5-Year PV of FCF</div><div style={{ fontSize:15,fontWeight:600,color:"#4a9eff" }}>{fmt(result.dcfResult.projectedValue)}</div></div>
-                      <div><div style={{ fontSize:9,color:"#565b64" }}>PV of Terminal</div><div style={{ fontSize:15,fontWeight:600,color:"#818cf8" }}>{fmt(result.dcfResult.terminalPV)}</div></div>
-                      <div><div style={{ fontSize:9,color:"#565b64" }}>Terminal % of Total</div><div style={{ fontSize:15,fontWeight:600,color:"#8a8f98" }}>{result.dcfResult.total>0?((result.dcfResult.terminalPV/result.dcfResult.total)*100).toFixed(0):0}%</div></div>
-                    </div>
-                  </div>
-
-                  {/* Active Rules */}
-                  <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px" }}>
-                    <div style={{ fontSize:10,letterSpacing:"0.1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:8 }}>Active Rules</div>
-                    <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
-                      {params.dividend<=0 && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>A: No dividend → DDM disabled</span>}
-                      {(params.bvps<=0||SERVICE_SECTORS.includes(params.sector.toLowerCase())) && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>B: {params.bvps<=0?"Negative BVPS":"Service sector"} → Graham disabled</span>}
-                      {params.epsTtm<=0 && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>C: Negative EPS → Graham & P/E disabled</span>}
-                      {params.dividend>0&&params.gDiv>=params.r && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>D: g_div ≥ r → capped at {pct(params.r-0.01)}</span>}
-                      {params.dividend>0&&params.gDiv<params.r&&!(params.bvps<=0||SERVICE_SECTORS.includes(params.sector.toLowerCase()))&&params.epsTtm>0 && <span style={{ fontSize:10,background:"#1e2028",color:"#565b64",padding:"3px 8px",borderRadius:4 }}>All models active — equal weighting</span>}
-                    </div>
-                  </div>
-
-                  {/* Sensitivity */}
-                  <button onClick={()=>setShowSens(!showSens)} onMouseEnter={()=>setSensHov(true)} onMouseLeave={()=>setSensHov(false)}
-                    style={{ background:"#111318",border:"1px solid "+(sensHov?"#4a9eff":"#2a2d35"),borderRadius:8,padding:"10px 16px",color:"#8a8f98",fontFamily:"'JetBrains Mono',monospace",fontSize:11,cursor:"pointer",textAlign:"left",transition:"border-color 0.15s" }}>
-                    {showSens?"▾":"▸"} Sensitivity Analysis (Discount Rate × FCF Growth)
-                  </button>
-                  {showSens && sensData && (
-                    <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:16,overflowX:"auto" }}>
-                      <table style={{ width:"100%",borderCollapse:"collapse",fontSize:11 }}>
-                        <thead><tr>
-                          <th style={{ padding:"6px 8px",color:"#565b64",textAlign:"left",fontSize:9 }}>r \ g_fcf</th>
-                          {[-0.02,-0.01,0,0.01,0.02].map(dg=><th key={dg} style={{ padding:"6px 8px",color:"#8a8f98",textAlign:"right",fontSize:10 }}>{pct(params.gFcf+dg)}</th>)}
-                        </tr></thead>
-                        <tbody>{sensData.map((row,ri)=>{
-                          const dr=[-0.02,-0.01,0,0.01,0.02][ri];
-                          return <tr key={ri}>
-                            <td style={{ padding:"6px 8px",color:"#8a8f98",fontWeight:500,fontSize:10 }}>{pct(params.r+dr)}</td>
-                            {row.map((val,ci)=>{const c=ri===2&&ci===2;return <td key={ci} style={{ padding:"6px 8px",textAlign:"right",color:val>params.price?"#34d399":"#f87171",fontWeight:c?700:400,background:c?"#1e2a3a":"transparent",borderRadius:c?4:0 }}>{fmt(val)}</td>;})}
-                          </tr>;
-                        })}</tbody>
-                      </table>
-                      <div style={{ fontSize:9,color:"#565b64",marginTop:8,textAlign:"center" }}>Green = above market price · Highlighted = current inputs</div>
-                    </div>
-                  )}
-                  <div style={{ fontSize:9,color:"#3a3d45",lineHeight:1.5,padding:"8px 0",borderTop:"1px solid #1a1c22" }}>
-                    This is an educational tool, not financial advice. Models use simplified assumptions. Always conduct thorough due diligence.
-                  </div>
-                </>) : (
-                  <div style={{ background:"#111318",border:"1px solid #2a2d35",borderRadius:12,padding:40,textAlign:"center",color:"#565b64" }}>No valid valuation models available for this input combination.</div>
-                )}
-              </div>
+          {/* Massive */}
+          <div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+              <span style={labelStyle}>Massive (Polygon.io)</span>
+              <span style={{fontSize:9,background:"#1a1e2a",color:"#818cf8",padding:"2px 6px",borderRadius:3}}>Real-time Price</span>
             </div>
-          </div>
-        </div>
-      );
-    }
-
-    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(React.StrictMode, null, React.createElement(StockValuator)));
-  </script>
-</body>
-</html>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stock Intrinsic Value Calculator</title>
-  <meta name="description" content="Multi-model stock valuation tool using DCF, DDM, P/E Multiple, and Graham Number with conditional blending." />
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>" />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
-  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
-  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #0c0e12; }
-    input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-    input[type=number] { -moz-appearance: textfield; appearance: textfield; }
-    ::selection { background: #4a9eff33; }
-    select { appearance: none; -webkit-appearance: none; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-    @keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
-  </style>
-</head>
-<body>
-  <div id="root"></div>
-  <script type="text/babel">
-    const { useState, useMemo, useEffect, useCallback } = React;
-
-    const SECTORS = [
-      "Technology", "Healthcare", "Financials", "Energy", "Industrials",
-      "Consumer Discretionary", "Consumer Staples", "Utilities", "Real Estate",
-      "Materials", "Communication Services", "Software", "Services"
-    ];
-    const SERVICE_SECTORS = ["technology", "healthcare", "services", "software"];
-    const SECTOR_MAP = {
-      "Technology": "Technology", "Healthcare": "Healthcare",
-      "Financial Services": "Financials", "Financials": "Financials",
-      "Energy": "Energy", "Industrials": "Industrials",
-      "Consumer Cyclical": "Consumer Discretionary", "Consumer Defensive": "Consumer Staples",
-      "Utilities": "Utilities", "Real Estate": "Real Estate",
-      "Basic Materials": "Materials", "Communication Services": "Communication Services",
-    };
-
-    /* ── Valuation Models ── */
-    function calcDCF(fcf, gFcf, gTerminal, r, years = 5) {
-      if (r <= gTerminal) return { projectedValue: 0, terminalPV: 0, total: 0 };
-      let dcfValue = 0;
-      for (let t = 1; t <= years; t++) {
-        dcfValue += (fcf * Math.pow(1 + gFcf, t)) / Math.pow(1 + r, t);
-      }
-      const terminalFcf = fcf * Math.pow(1 + gFcf, years);
-      const tv = (terminalFcf * (1 + gTerminal)) / (r - gTerminal);
-      const pvT = tv / Math.pow(1 + r, years);
-      return { projectedValue: dcfValue, terminalPV: pvT, total: dcfValue + pvT };
-    }
-    function calcDDM(div, gDiv, r) {
-      if (div <= 0) return 0;
-      const g = Math.min(gDiv, r - 0.01);
-      return (div * (1 + g)) / (r - g);
-    }
-    function calcPE(epsFwd, peT, r) { return epsFwd <= 0 ? 0 : (epsFwd * peT) / (1 + r); }
-    function calcGraham(eps, bvps) { return (eps <= 0 || bvps <= 0) ? 0 : Math.sqrt(22.5 * eps * bvps); }
-
-    function evaluate(p) {
-      const dcfR = calcDCF(p.fcf, p.gFcf, p.gTerminal, p.r);
-      const vDcf = dcfR.total, vDdm = calcDDM(p.dividend, p.gDiv, p.r);
-      const vPe = calcPE(p.epsFwd, p.peTarget, p.r), vGr = calcGraham(p.epsTtm, p.bvps);
-      const w = { DCF: 0.25, DDM: 0.25, PE: 0.25, Graham: 0.25 };
-      if (p.dividend <= 0) w.DDM = 0;
-      if (p.bvps <= 0 || SERVICE_SECTORS.includes(p.sector.toLowerCase())) w.Graham = 0;
-      if (p.epsTtm <= 0) { w.Graham = 0; w.PE = 0; }
-      const n = Object.values(w).filter(v => v > 0).length;
-      if (n === 0) return null;
-      const a = 1.0 / n;
-      for (const k in w) { if (w[k] > 0) w[k] = a; }
-      const bl = vDcf*w.DCF + vDdm*w.DDM + vPe*w.PE + vGr*w.Graham;
-      const d = ((bl - p.price) / bl) * 100;
-      return { models: { DCF: vDcf, DDM: vDdm, PE: vPe, Graham: vGr }, weights: w, blended: bl, discount: d, marginOfSafety: d, dcfResult: dcfR, verdict: p.price < bl ? "UNDERVALUED" : "OVERVALUED" };
-    }
-    function sensitivityTable(p) {
-      const o = [-0.02, -0.01, 0, 0.01, 0.02];
-      return o.map(dr => o.map(dg => {
-        const r = Math.max(p.r + dr, 0.02), gF = p.gFcf + dg, gT = Math.min(p.gTerminal, r - 0.01);
-        const res = evaluate({ ...p, r, gFcf: gF, gTerminal: gT });
-        return res ? res.blended : 0;
-      }));
-    }
-    const fmt = v => v >= 1000 ? "$"+(v/1000).toFixed(1)+"k" : "$"+v.toFixed(2);
-    const pct = v => (v*100).toFixed(1)+"%";
-
-    /* ── API Fetching ── */
-    async function fetchFMP(ticker, key) {
-      const b = "https://financialmodelingprep.com/api/v3";
-      const [prof, met, est, qt] = await Promise.allSettled([
-        fetch(b+"/profile/"+ticker+"?apikey="+key).then(r=>r.json()),
-        fetch(b+"/key-metrics-ttm/"+ticker+"?apikey="+key).then(r=>r.json()),
-        fetch(b+"/analyst-estimates/"+ticker+"?limit=1&apikey="+key).then(r=>r.json()),
-        fetch(b+"/quote/"+ticker+"?apikey="+key).then(r=>r.json()),
-      ]);
-      const profile = prof.status==="fulfilled" && Array.isArray(prof.value) ? prof.value[0] : null;
-      const metrics = met.status==="fulfilled" && Array.isArray(met.value) ? met.value[0] : null;
-      const estimates = est.status==="fulfilled" && Array.isArray(est.value) ? est.value[0] : null;
-      const quote = qt.status==="fulfilled" && Array.isArray(qt.value) ? qt.value[0] : null;
-      if (!profile && !quote) throw new Error("FMP: no data for "+ticker);
-      const d = {};
-      if (quote) { d.price = quote.price||0; d.epsTtm = quote.eps||0; d.peTarget = quote.pe ? Math.round(quote.pe) : 15; }
-      if (profile) { if (!d.price) d.price = profile.price||0; d.dividend = profile.lastDiv||0; d.sector = SECTOR_MAP[profile.sector]||profile.sector||"Industrials"; d.companyName = profile.companyName||ticker; }
-      if (metrics) { d.bvps = metrics.bookValuePerShareTTM||0; d.fcf = metrics.freeCashFlowPerShareTTM||0; if (metrics.dividendPerShareTTM) d.dividend = metrics.dividendPerShareTTM; }
-      if (estimates) { d.epsFwd = estimates.estimatedEpsAvg||0; }
-      return d;
-    }
-    async function fetchMassivePrice(ticker, key) {
-      const res = await fetch("https://api.massive.com/v2/snapshot/locale/us/markets/stocks/tickers/"+ticker+"?apiKey="+key);
-      const d = await res.json();
-      if (d?.ticker?.day?.c) return { price: d.ticker.day.c };
-      if (d?.ticker?.lastTrade?.p) return { price: d.ticker.lastTrade.p };
-      return null;
-    }
-
-    /* ── Components ── */
-    function SettingsModal({ isOpen, onClose, keys, setKeys }) {
-      const [local, setLocal] = useState(keys);
-      useEffect(() => { if (isOpen) setLocal(keys); }, [isOpen, keys]);
-      if (!isOpen) return null;
-      const save = () => { setKeys(local); try { localStorage.setItem("sv_keys", JSON.stringify(local)); } catch(e) {} onClose(); };
-
-      return (
-        <div style={{ position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,0.7)",backdropFilter:"blur(4px)",display:"flex",alignItems:"center",justifyContent:"center",animation:"fadeIn 0.15s ease" }} onClick={onClose}>
-          <div onClick={e=>e.stopPropagation()} style={{ background:"#111318",border:"1px solid #2a2d35",borderRadius:14,padding:28,width:420,maxWidth:"90vw",animation:"slideUp 0.2s ease" }}>
-            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20 }}>
-              <h2 style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:18,fontWeight:700,color:"#e8eaed" }}>API Settings</h2>
-              <button onClick={onClose} style={{ background:"none",border:"none",color:"#565b64",fontSize:20,cursor:"pointer",padding:4 }}>✕</button>
-            </div>
-            <div style={{ display:"flex",flexDirection:"column",gap:18 }}>
-              <div>
-                <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6 }}>
-                  <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Financial Modeling Prep</span>
-                  <span style={{ fontSize:9,background:"#1a2a1f",color:"#34d399",padding:"2px 6px",borderRadius:3 }}>Fundamentals</span>
-                </div>
-                <input type="password" value={local.fmp} placeholder="Your FMP API key"
-                  onChange={e=>setLocal(l=>({...l,fmp:e.target.value}))}
-                  style={{ width:"100%",background:"#0c0e12",border:"1px solid #2a2d35",borderRadius:6,padding:"10px 12px",color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:12,outline:"none" }} />
-                <div style={{ fontSize:9,color:"#565b64",marginTop:4 }}>EPS, book value, FCF, dividends, sector, forward estimates · 250 calls/day free</div>
-              </div>
-              <div>
-                <div style={{ display:"flex",alignItems:"center",gap:8,marginBottom:6 }}>
-                  <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Massive (Polygon.io)</span>
-                  <span style={{ fontSize:9,background:"#1a1e2a",color:"#818cf8",padding:"2px 6px",borderRadius:3 }}>Real-time Price</span>
-                </div>
-                <input type="password" value={local.massive} placeholder="Your Massive API key"
-                  onChange={e=>setLocal(l=>({...l,massive:e.target.value}))}
-                  style={{ width:"100%",background:"#0c0e12",border:"1px solid #2a2d35",borderRadius:6,padding:"10px 12px",color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:12,outline:"none" }} />
-                <div style={{ fontSize:9,color:"#565b64",marginTop:4 }}>Real-time / delayed stock price snapshot · Optional — FMP also provides price</div>
-              </div>
-            </div>
-            <div style={{ display:"flex",gap:10,marginTop:24 }}>
-              <button onClick={save} style={{ flex:1,background:"#4a9eff",border:"none",borderRadius:8,padding:"10px 0",color:"#fff",fontFamily:"'Space Grotesk',sans-serif",fontSize:13,fontWeight:600,cursor:"pointer" }}>Save Keys</button>
-              <button onClick={onClose} style={{ flex:1,background:"#1e2028",border:"1px solid #2a2d35",borderRadius:8,padding:"10px 0",color:"#8a8f98",fontFamily:"'Space Grotesk',sans-serif",fontSize:13,fontWeight:500,cursor:"pointer" }}>Cancel</button>
-            </div>
-            <div style={{ fontSize:9,color:"#3a3d45",marginTop:14,lineHeight:1.5,textAlign:"center" }}>
-              Keys are stored in your browser's localStorage and only sent to the respective API providers.
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    function InputField({ label, value, onChange, suffix, step="0.01", min, tooltip }) {
-      const [f,sF]=useState(false);
-      return (
-        <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
-          <label style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98",fontWeight:500 }}>
-            {label}{tooltip && <span style={{ marginLeft:4,color:"#565b64",cursor:"help" }} title={tooltip}>ⓘ</span>}
-          </label>
-          <div style={{ position:"relative" }}>
-            <input type="number" value={value} step={step} min={min}
-              onChange={e=>onChange(parseFloat(e.target.value)||0)}
-              onFocus={()=>sF(true)} onBlur={()=>sF(false)}
-              style={{ width:"100%",boxSizing:"border-box",background:"#13151a",border:"1px solid "+(f?"#4a9eff":"#2a2d35"),borderRadius:6,padding:"8px 10px",paddingRight:suffix?32:10,color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:13,outline:"none",transition:"border-color 0.15s" }} />
-            {suffix && <span style={{ position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:"#565b64",fontSize:11,fontFamily:"'JetBrains Mono',monospace" }}>{suffix}</span>}
-          </div>
-        </div>
-      );
-    }
-
-    function ModelCard({ name, value, weight, price, icon }) {
-      const on=weight>0, up=value>price&&on;
-      return (
-        <div style={{ background:on?"#16181e":"#111318",border:"1px solid "+(on?"#2a2d35":"#1e2028"),borderRadius:10,padding:"14px 16px",opacity:on?1:0.4,transition:"all 0.3s ease" }}>
-          <div style={{ display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8 }}>
-            <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.1em",textTransform:"uppercase",color:"#8a8f98" }}>{icon} {name}</span>
-            <span style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,background:on?"#1e2a3a":"#1a1c22",color:on?"#4a9eff":"#444",padding:"2px 7px",borderRadius:4 }}>{(weight*100).toFixed(0)}%</span>
-          </div>
-          <div style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:20,fontWeight:700,color:!on?"#444":up?"#34d399":"#f87171" }}>{on?fmt(value):"N/A"}</div>
-          {on && <div style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,marginTop:4,color:up?"#34d39988":"#f8717188" }}>{up?"▲":"▼"} {Math.abs(((value-price)/price)*100).toFixed(1)}% vs price</div>}
-        </div>
-      );
-    }
-
-    function BarGauge({ price, blended }) {
-      const mn=Math.min(price,blended)*0.7, mx=Math.max(price,blended)*1.3, rng=mx-mn||1;
-      const pp=Math.max(2,Math.min(98,((price-mn)/rng)*100)), bp=Math.max(2,Math.min(98,((blended-mn)/rng)*100));
-      const u=price<blended;
-      return (
-        <div style={{ position:"relative",height:40,margin:"16px 0 8px" }}>
-          <div style={{ position:"absolute",top:16,left:0,right:0,height:8,background:"#1e2028",borderRadius:4,overflow:"hidden" }}>
-            <div style={{ position:"absolute",left:Math.min(pp,bp)+"%",width:Math.abs(bp-pp)+"%",height:"100%",background:u?"linear-gradient(90deg,#f8717144,#34d39944)":"linear-gradient(90deg,#34d39944,#f8717144)",borderRadius:4 }} />
-          </div>
-          <div style={{ position:"absolute",left:pp+"%",top:0,transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center" }}>
-            <span style={{ fontSize:8,fontFamily:"'JetBrains Mono',monospace",color:"#f87171",whiteSpace:"nowrap" }}>MKT</span>
-            <div style={{ width:2,height:22,background:"#f87171",borderRadius:1 }} />
-          </div>
-          <div style={{ position:"absolute",left:bp+"%",top:0,transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center" }}>
-            <span style={{ fontSize:8,fontFamily:"'JetBrains Mono',monospace",color:"#34d399",whiteSpace:"nowrap" }}>IV</span>
-            <div style={{ width:2,height:22,background:"#34d399",borderRadius:1 }} />
-          </div>
-        </div>
-      );
-    }
-
-    function Spinner() {
-      return <span style={{ display:"inline-block",width:14,height:14,border:"2px solid #2a2d35",borderTopColor:"#4a9eff",borderRadius:"50%",animation:"spin 0.6s linear infinite" }} />;
-    }
-
-    /* ── Main App ── */
-    function StockValuator() {
-      const [params, setParams] = useState({
-        ticker:"UNH", price:269.35, epsTtm:13.23, epsFwd:17.75,
-        bvps:106.0, dividend:8.84, gDiv:0.06, fcf:16.0,
-        gFcf:0.06, gTerminal:0.025, r:0.09, peTarget:17.0, sector:"Healthcare"
-      });
-      const [showSens, setShowSens] = useState(false);
-      const [sensHov, setSensHov] = useState(false);
-      const [settingsOpen, setSettingsOpen] = useState(false);
-      const [keys, setKeys] = useState({ fmp:"", massive:"" });
-      const [status, setStatus] = useState({ loading:false, error:null, sources:[] });
-      const [coName, setCoName] = useState("");
-
-      useEffect(() => { try { const s=localStorage.getItem("sv_keys"); if(s) setKeys(JSON.parse(s)); } catch(e){} }, []);
-
-      const set = k => v => setParams(p=>({...p,[k]:v}));
-      const result = useMemo(()=>evaluate(params),[params]);
-      const sensData = useMemo(()=>showSens?sensitivityTable(params):null,[params,showSens]);
-      const hasKeys = keys.fmp || keys.massive;
-
-      const fetchData = useCallback(async () => {
-        if (!params.ticker.trim()) return;
-        if (!keys.fmp && !keys.massive) { setSettingsOpen(true); return; }
-        setStatus({ loading:true, error:null, sources:[] });
-        const srcs = [];
-        let fd = {};
-        try {
-          if (keys.fmp) {
-            try { const d = await fetchFMP(params.ticker.trim(), keys.fmp); fd={...fd,...d}; srcs.push("FMP"); } catch(e) { console.warn("FMP:",e.message); }
-          }
-          if (keys.massive) {
-            try { const d = await fetchMassivePrice(params.ticker.trim(), keys.massive); if(d?.price>0){fd.price=d.price;srcs.push("Massive");} } catch(e) { console.warn("Massive:",e.message); }
-          }
-          if (srcs.length===0) throw new Error("All API calls failed. Check your keys and ticker symbol.");
-          setParams(p=>({...p,
-            price:fd.price||p.price, epsTtm:fd.epsTtm??p.epsTtm, epsFwd:fd.epsFwd??p.epsFwd,
-            bvps:fd.bvps??p.bvps, dividend:fd.dividend??p.dividend, fcf:fd.fcf??p.fcf,
-            sector:fd.sector||p.sector, peTarget:fd.peTarget||p.peTarget,
-          }));
-          if(fd.companyName) setCoName(fd.companyName);
-          setStatus({ loading:false, error:null, sources:srcs });
-        } catch(e) { setStatus({ loading:false, error:e.message, sources:[] }); }
-      }, [params.ticker, keys]);
-
-      const onTickerKey = e => { if(e.key==="Enter") fetchData(); };
-
-      return (
-        <div style={{ minHeight:"100vh",background:"#0c0e12",color:"#e8eaed",fontFamily:"'JetBrains Mono','Fira Code',monospace",padding:"24px 20px" }}>
-          <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} keys={keys} setKeys={setKeys} />
-
-          <div style={{ maxWidth:920,margin:"0 auto" }}>
-            {/* Header */}
-            <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4 }}>
-              <div>
-                <div style={{ display:"flex",alignItems:"baseline",gap:12 }}>
-                  <h1 style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:22,fontWeight:700,color:"#e8eaed",letterSpacing:"-0.02em" }}>Intrinsic Value</h1>
-                  <span style={{ fontSize:10,color:"#565b64",letterSpacing:"0.08em" }}>MULTI-MODEL</span>
-                </div>
-                <p style={{ fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5 }}>DCF · Dividend Discount · P/E Multiple · Graham Number — blended with conditional weighting</p>
-              </div>
-              <button onClick={()=>setSettingsOpen(true)} title="API Settings"
-                style={{ background:hasKeys?"#111318":"#1e2028",border:"1px solid "+(hasKeys?"#2a2d35":"#4a9eff44"),borderRadius:8,padding:"8px 12px",color:hasKeys?"#8a8f98":"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:6,transition:"all 0.15s" }}>
-                <span style={{ fontSize:14 }}>⚙</span>{hasKeys?"API Keys":"Set API Keys"}
+            <div style={{display:"flex",gap:8}}>
+              <input type="password" value={local.massive} placeholder="Your Massive API key"
+                onChange={e=>setLocal(l=>({...l,massive:e.target.value}))}
+                style={{...inputStyle,flex:1}}/>
+              <button onClick={()=>testKey("massive")} disabled={testing.massive}
+                style={{background:"#1a1e2a",border:"1px solid #2a3a5a",borderRadius:6,padding:"0 14px",color:"#818cf8",fontFamily:mono,fontSize:10,fontWeight:600,cursor:testing.massive?"wait":"pointer",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:6}}>
+                {testing.massive?<Spinner size={10} color="#818cf8"/>:null}{testing.massive?"Testing...":"Test"}
               </button>
             </div>
+            {testMsg.massive&&<div style={{fontSize:9,color:testMsg.massive.ok?"#34d399":"#f87171",marginTop:5,display:"flex",alignItems:"center",gap:4}}>
+              {testMsg.massive.ok?"✓":"✗"} {testMsg.massive.msg}
+            </div>}
+            <div style={{fontSize:9,color:"#565b64",marginTop:4}}>Real-time / delayed stock price · optional — FMP also provides price</div>
+          </div>
+        </div>
 
-            <div style={{ height:20 }} />
+        <div style={{display:"flex",gap:10,marginTop:24}}>
+          <button onClick={save} style={{flex:1,background:"#4a9eff",border:"none",borderRadius:8,padding:"10px 0",color:"#fff",fontFamily:sans,fontSize:13,fontWeight:600,cursor:"pointer"}}>Save Keys</button>
+          <button onClick={onClose} style={{flex:1,background:"#1e2028",border:"1px solid #2a2d35",borderRadius:8,padding:"10px 0",color:"#8a8f98",fontFamily:sans,fontSize:13,fontWeight:500,cursor:"pointer"}}>Cancel</button>
+        </div>
+        <div style={{fontSize:9,color:"#3a3d45",marginTop:14,lineHeight:1.5,textAlign:"center"}}>
+          Keys are stored in your browser's localStorage and only sent to the respective API providers.
+        </div>
+      </div>
+    </div>
+  );
+}
 
-            <div style={{ display:"grid",gridTemplateColumns:"320px 1fr",gap:24,alignItems:"start" }}>
-              {/* ── Input Panel ── */}
-              <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:12,padding:20,display:"flex",flexDirection:"column",gap:18 }}>
-                {/* Ticker + Sector */}
-                <div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
-                      <label style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Ticker</label>
-                      <input type="text" value={params.ticker}
-                        onChange={e=>setParams(p=>({...p,ticker:e.target.value.toUpperCase()}))}
-                        onKeyDown={onTickerKey}
-                        placeholder="e.g. AAPL"
-                        style={{ background:"#13151a",border:"1px solid #2a2d35",borderRadius:6,padding:"8px 10px",color:"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:15,fontWeight:700,outline:"none",width:"100%",boxSizing:"border-box" }} />
-                    </div>
-                    <div style={{ display:"flex",flexDirection:"column",gap:3 }}>
-                      <label style={{ fontFamily:"'JetBrains Mono',monospace",fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98" }}>Sector</label>
-                      <select value={params.sector} onChange={e=>setParams(p=>({...p,sector:e.target.value}))}
-                        style={{ background:"#13151a",border:"1px solid #2a2d35",borderRadius:6,padding:"8px 10px",color:"#e8eaed",fontFamily:"'JetBrains Mono',monospace",fontSize:11,outline:"none",width:"100%",boxSizing:"border-box",cursor:"pointer" }}>
-                        {SECTORS.map(s=><option key={s} value={s}>{s}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                  {/* Fetch Button */}
-                  <button onClick={fetchData} disabled={status.loading}
-                    style={{ marginTop:10,width:"100%",background:status.loading?"#1e2028":"linear-gradient(135deg,#1a2a3a,#162030)",border:"1px solid "+(status.loading?"#2a2d35":"#2a4a6a"),borderRadius:7,padding:"9px 0",color:status.loading?"#565b64":"#4a9eff",fontFamily:"'JetBrains Mono',monospace",fontSize:11,fontWeight:600,cursor:status.loading?"wait":"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:8,transition:"all 0.15s" }}>
-                    {status.loading?<><Spinner/> Fetching...</>:"⟳ Fetch Live Data"}
-                  </button>
-                  {status.error && <div style={{ fontSize:9,color:"#f87171",marginTop:6,lineHeight:1.4 }}>{status.error}</div>}
-                  {status.sources.length>0 && !status.error && (
-                    <div style={{ fontSize:9,color:"#34d399",marginTop:6,display:"flex",alignItems:"center",gap:4 }}>
-                      ✓ Loaded from {status.sources.join(" + ")}{coName && <span style={{ color:"#565b64" }}>· {coName}</span>}
-                    </div>
-                  )}
-                  {!hasKeys && !status.loading && <div style={{ fontSize:9,color:"#565b64",marginTop:6 }}>Set API keys via ⚙ to enable live data</div>}
-                </div>
-                <div style={{ height:1,background:"#1e2028" }} />
-                <div>
-                  <div style={{ fontSize:9,color:"#565b64",letterSpacing:"0.12em",marginBottom:10,textTransform:"uppercase" }}>Price & Earnings</div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <InputField label="Market Price" value={params.price} onChange={set("price")} suffix="$" />
-                    <InputField label="EPS (TTM)" value={params.epsTtm} onChange={set("epsTtm")} suffix="$" tooltip="Trailing 12-month earnings per share" />
-                    <InputField label="EPS (Fwd)" value={params.epsFwd} onChange={set("epsFwd")} suffix="$" tooltip="Forward consensus estimate" />
-                    <InputField label="Book Value/Sh" value={params.bvps} onChange={set("bvps")} suffix="$" />
-                  </div>
-                </div>
-                <div style={{ height:1,background:"#1e2028" }} />
-                <div>
-                  <div style={{ fontSize:9,color:"#565b64",letterSpacing:"0.12em",marginBottom:10,textTransform:"uppercase" }}>Cash Flow & Dividends</div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <InputField label="FCF / Share" value={params.fcf} onChange={set("fcf")} suffix="$" tooltip="Free cash flow per share" />
-                    <InputField label="FCF Growth" value={params.gFcf} onChange={set("gFcf")} step="0.005" tooltip="Annual FCF growth rate (decimal)" />
-                    <InputField label="Dividend / Sh" value={params.dividend} onChange={set("dividend")} suffix="$" />
-                    <InputField label="Div Growth" value={params.gDiv} onChange={set("gDiv")} step="0.005" />
-                  </div>
-                </div>
-                <div style={{ height:1,background:"#1e2028" }} />
-                <div>
-                  <div style={{ fontSize:9,color:"#565b64",letterSpacing:"0.12em",marginBottom:10,textTransform:"uppercase" }}>Model Parameters</div>
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <InputField label="Discount Rate" value={params.r} onChange={set("r")} step="0.005" min="0.01" tooltip="Required rate of return (WACC)" />
-                    <InputField label="Terminal Growth" value={params.gTerminal} onChange={set("gTerminal")} step="0.005" tooltip="Long-term perpetuity growth" />
-                    <InputField label="Target P/E" value={params.peTarget} onChange={set("peTarget")} step="0.5" tooltip="Fair P/E multiple for sector" />
-                  </div>
-                </div>
+function InputField({label,value,onChange,suffix,step="0.01",min,tooltip}){
+  const[f,sF]=useState(false);
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:3}}>
+      <label style={{fontFamily:mono,fontSize:10,letterSpacing:"0.08em",textTransform:"uppercase",color:"#8a8f98",fontWeight:500}}>
+        {label}{tooltip&&<span style={{marginLeft:4,color:"#565b64",cursor:"help"}} title={tooltip}>ⓘ</span>}
+      </label>
+      <div style={{position:"relative"}}>
+        <input type="number" value={value} step={step} min={min}
+          onChange={e=>onChange(parseFloat(e.target.value)||0)}
+          onFocus={()=>sF(true)} onBlur={()=>sF(false)}
+          style={{width:"100%",boxSizing:"border-box",background:"#13151a",border:"1px solid "+(f?"#4a9eff":"#2a2d35"),borderRadius:6,padding:"8px 10px",paddingRight:suffix?32:10,color:"#e8eaed",fontFamily:mono,fontSize:13,outline:"none",transition:"border-color .15s"}}/>
+        {suffix&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:"#565b64",fontSize:11,fontFamily:mono}}>{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
+function ModelCard({name,value,weight,price,icon}){
+  const on=weight>0,up=value>price&&on;
+  return(
+    <div style={{background:on?"#16181e":"#111318",border:"1px solid "+(on?"#2a2d35":"#1e2028"),borderRadius:10,padding:"14px 16px",opacity:on?1:.4,transition:"all .3s ease"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+        <span style={{fontFamily:mono,fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8f98"}}>{icon} {name}</span>
+        <span style={{fontFamily:mono,fontSize:10,background:on?"#1e2a3a":"#1a1c22",color:on?"#4a9eff":"#444",padding:"2px 7px",borderRadius:4}}>{(weight*100).toFixed(0)}%</span>
+      </div>
+      <div style={{fontFamily:mono,fontSize:20,fontWeight:700,color:!on?"#444":up?"#34d399":"#f87171"}}>{on?fmt(value):"N/A"}</div>
+      {on&&<div style={{fontFamily:mono,fontSize:10,marginTop:4,color:up?"#34d39988":"#f8717188"}}>{up?"▲":"▼"} {Math.abs(((value-price)/price)*100).toFixed(1)}% vs price</div>}
+    </div>
+  );
+}
+
+function BarGauge({price,blended}){
+  const mn=Math.min(price,blended)*.7,mx=Math.max(price,blended)*1.3,rng=mx-mn||1;
+  const pp=Math.max(2,Math.min(98,((price-mn)/rng)*100)),bp=Math.max(2,Math.min(98,((blended-mn)/rng)*100));
+  const u=price<blended;
+  return(
+    <div style={{position:"relative",height:40,margin:"16px 0 8px"}}>
+      <div style={{position:"absolute",top:16,left:0,right:0,height:8,background:"#1e2028",borderRadius:4,overflow:"hidden"}}>
+        <div style={{position:"absolute",left:Math.min(pp,bp)+"%",width:Math.abs(bp-pp)+"%",height:"100%",background:u?"linear-gradient(90deg,#f8717144,#34d39944)":"linear-gradient(90deg,#34d39944,#f8717144)",borderRadius:4}}/>
+      </div>
+      <div style={{position:"absolute",left:pp+"%",top:0,transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center"}}>
+        <span style={{fontSize:8,fontFamily:mono,color:"#f87171",whiteSpace:"nowrap"}}>MKT</span>
+        <div style={{width:2,height:22,background:"#f87171",borderRadius:1}}/>
+      </div>
+      <div style={{position:"absolute",left:bp+"%",top:0,transform:"translateX(-50%)",display:"flex",flexDirection:"column",alignItems:"center"}}>
+        <span style={{fontSize:8,fontFamily:mono,color:"#34d399",whiteSpace:"nowrap"}}>IV</span>
+        <div style={{width:2,height:22,background:"#34d399",borderRadius:1}}/>
+      </div>
+    </div>
+  );
+}
+
+/* ── Main App ── */
+function App(){
+  const[params,setParams]=useState({
+    ticker:"UNH",price:269.35,epsTtm:13.23,epsFwd:17.75,
+    bvps:106,dividend:8.84,gDiv:.06,fcf:16,
+    gFcf:.06,gTerminal:.025,r:.09,peTarget:17,sector:"Healthcare"
+  });
+  const[showSens,setShowSens]=useState(false);
+  const[sensHov,setSensHov]=useState(false);
+  const[settingsOpen,setSettingsOpen]=useState(false);
+  const[keys,setKeys]=useState({fmp:"",massive:""});
+  const[apiStatus,setApiStatus]=useState({fmp:"none",massive:"none"});
+  const[fetchSt,setFetchSt]=useState({loading:false,error:null,sources:[]});
+  const[coName,setCoName]=useState("");
+
+  // Load saved keys & auto-test on mount
+  useEffect(()=>{
+    try{
+      const s=localStorage.getItem("sv_keys");
+      if(s){
+        const parsed=JSON.parse(s);
+        setKeys(parsed);
+        // Auto-test saved keys
+        if(parsed.fmp){
+          testFMPKey(parsed.fmp).then(()=>setApiStatus(p=>({...p,fmp:"connected"}))).catch(()=>setApiStatus(p=>({...p,fmp:"error"})));
+        }
+        if(parsed.massive){
+          testMassiveKey(parsed.massive).then(()=>setApiStatus(p=>({...p,massive:"connected"}))).catch(()=>setApiStatus(p=>({...p,massive:"error"})));
+        }
+      }
+    }catch(e){}
+  },[]);
+
+  const set=k=>v=>setParams(p=>({...p,[k]:v}));
+  const result=useMemo(()=>evaluate(params),[params]);
+  const sensData=useMemo(()=>showSens?sensTable(params):null,[params,showSens]);
+  const hasKeys=keys.fmp||keys.massive;
+
+  const fetchData=useCallback(async()=>{
+    if(!params.ticker.trim())return;
+    if(!keys.fmp&&!keys.massive){setSettingsOpen(true);return;}
+    setFetchSt({loading:true,error:null,sources:[]});
+    const srcs=[];let fd={};
+    try{
+      if(keys.fmp){
+        try{const d=await fetchFMP(params.ticker.trim(),keys.fmp);fd={...fd,...d};srcs.push("FMP");setApiStatus(p=>({...p,fmp:"connected"}));}
+        catch(e){console.warn("FMP:",e.message);setApiStatus(p=>({...p,fmp:"error"}));}
+      }
+      if(keys.massive){
+        try{const d=await fetchMassivePrice(params.ticker.trim(),keys.massive);if(d?.price>0){fd.price=d.price;srcs.push("Massive");}setApiStatus(p=>({...p,massive:"connected"}));}
+        catch(e){console.warn("Massive:",e.message);setApiStatus(p=>({...p,massive:"error"}));}
+      }
+      if(srcs.length===0)throw new Error("All API calls failed — check your keys and ticker symbol.");
+      setParams(p=>({...p,
+        price:fd.price||p.price,epsTtm:fd.epsTtm??p.epsTtm,epsFwd:fd.epsFwd??p.epsFwd,
+        bvps:fd.bvps??p.bvps,dividend:fd.dividend??p.dividend,fcf:fd.fcf??p.fcf,
+        sector:fd.sector||p.sector,peTarget:fd.peTarget||p.peTarget,
+      }));
+      if(fd.companyName)setCoName(fd.companyName);
+      setFetchSt({loading:false,error:null,sources:srcs});
+    }catch(e){setFetchSt({loading:false,error:e.message,sources:[]});}
+  },[params.ticker,keys]);
+
+  const onTickerKey=e=>{if(e.key==="Enter")fetchData();};
+
+  return(
+    <div style={{minHeight:"100vh",background:"#0c0e12",color:"#e8eaed",fontFamily:mono}}>
+      <StatusBar apiStatus={apiStatus}/>
+      <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} keys={keys} setKeys={setKeys} apiStatus={apiStatus} setApiStatus={setApiStatus}/>
+
+      <div style={{maxWidth:920,margin:"0 auto",padding:"20px 20px 40px"}}>
+        {/* Header */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+          <div>
+            <div style={{display:"flex",alignItems:"baseline",gap:12}}>
+              <h1 style={{fontFamily:sans,fontSize:22,fontWeight:700,color:"#e8eaed",letterSpacing:"-.02em"}}>Intrinsic Value</h1>
+              <span style={{fontSize:10,color:"#565b64",letterSpacing:".08em"}}>MULTI-MODEL</span>
+            </div>
+            <p style={{fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5}}>DCF · Dividend Discount · P/E Multiple · Graham Number — blended with conditional weighting</p>
+          </div>
+          <button onClick={()=>setSettingsOpen(true)} title="API Settings"
+            style={{background:hasKeys?"#111318":"#1e2028",border:"1px solid "+(hasKeys?"#2a2d35":"#4a9eff44"),borderRadius:8,padding:"8px 12px",color:hasKeys?"#8a8f98":"#4a9eff",fontFamily:mono,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:6,transition:"all .15s"}}>
+            <span style={{fontSize:14}}>⚙</span>{hasKeys?"API Keys":"Set API Keys"}
+          </button>
+        </div>
+
+        <div style={{height:16}}/>
+
+        <div style={{display:"grid",gridTemplateColumns:"320px 1fr",gap:24,alignItems:"start"}}>
+          {/* ── Left: Inputs ── */}
+          <div style={{background:"#111318",border:"1px solid #1e2028",borderRadius:12,padding:20,display:"flex",flexDirection:"column",gap:18,overflow:"hidden"}}>
+            {/* Ticker + Fetch */}
+            <div>
+              <label style={{fontFamily:mono,fontSize:10,letterSpacing:".08em",textTransform:"uppercase",color:"#8a8f98",display:"block",marginBottom:3}}>Ticker</label>
+              <div style={{display:"flex",gap:8,width:"100%"}}>
+                <input type="text" value={params.ticker}
+                  onChange={e=>setParams(p=>({...p,ticker:e.target.value.toUpperCase()}))}
+                  onKeyDown={onTickerKey} placeholder="e.g. AAPL"
+                  style={{background:"#13151a",border:"1px solid #2a2d35",borderRadius:6,padding:"8px 10px",color:"#4a9eff",fontFamily:mono,fontSize:15,fontWeight:700,outline:"none",flex:1,minWidth:0,boxSizing:"border-box"}}/>
+                <button onClick={fetchData} disabled={fetchSt.loading}
+                  style={{background:fetchSt.loading?"#1e2028":"linear-gradient(135deg,#1a2a3a,#162030)",border:"1px solid "+(fetchSt.loading?"#2a2d35":"#2a4a6a"),borderRadius:6,padding:"0 12px",color:fetchSt.loading?"#565b64":"#4a9eff",fontFamily:mono,fontSize:11,fontWeight:600,cursor:fetchSt.loading?"wait":"pointer",display:"flex",alignItems:"center",gap:5,whiteSpace:"nowrap",flexShrink:0}}>
+                  {fetchSt.loading?<><Spinner/> Fetching...</>:"⟳ Fetch"}
+                </button>
               </div>
+              {fetchSt.error&&<div style={{fontSize:9,color:"#f87171",marginTop:6,lineHeight:1.4}}>{fetchSt.error}</div>}
+              {fetchSt.sources.length>0&&!fetchSt.error&&(
+                <div style={{fontSize:9,color:"#34d399",marginTop:6,display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+                  ✓ {coName||params.ticker} — loaded from {fetchSt.sources.join(" + ")}
+                  {params.sector&&<span style={{color:"#565b64"}}>· {params.sector}</span>}
+                </div>
+              )}
+              {!hasKeys&&!fetchSt.loading&&<div style={{fontSize:9,color:"#565b64",marginTop:6}}>Set API keys via ⚙ to enable live data</div>}
+            </div>
 
-              {/* ── Results Panel ── */}
-              <div style={{ display:"flex",flexDirection:"column",gap:16 }}>
-                {result ? (<>
-                  {/* Verdict */}
-                  <div style={{ background:result.verdict==="UNDERVALUED"?"linear-gradient(135deg,#0a2a1f,#112820)":"linear-gradient(135deg,#2a0f0f,#281414)",border:"1px solid "+(result.verdict==="UNDERVALUED"?"#1a4a35":"#4a1a1a"),borderRadius:12,padding:"20px 24px" }}>
-                    <div style={{ display:"flex",justifyContent:"space-between",alignItems:"flex-start" }}>
-                      <div>
-                        <div style={{ fontSize:10,letterSpacing:"0.12em",textTransform:"uppercase",color:result.verdict==="UNDERVALUED"?"#34d399":"#f87171",marginBottom:6,fontWeight:600 }}>{params.ticker} · {result.verdict}</div>
-                        <div style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:36,fontWeight:700,color:result.verdict==="UNDERVALUED"?"#34d399":"#f87171" }}>{fmt(result.blended)}</div>
-                        <div style={{ fontSize:11,color:"#8a8f98",marginTop:4 }}>Blended Intrinsic Value</div>
-                      </div>
-                      <div style={{ textAlign:"right" }}>
-                        <div style={{ fontSize:10,color:"#8a8f98",marginBottom:4 }}>Market Price</div>
-                        <div style={{ fontFamily:"'Space Grotesk',sans-serif",fontSize:22,fontWeight:600,color:"#e8eaed" }}>${params.price.toFixed(2)}</div>
-                        <div style={{ fontSize:13,fontWeight:600,marginTop:4,color:result.discount>0?"#34d399":"#f87171" }}>
-                          {result.discount>0?"▲":"▼"} {Math.abs(result.discount).toFixed(1)}% {result.discount>0?"upside":"downside"}
-                        </div>
-                      </div>
-                    </div>
-                    <BarGauge price={params.price} blended={result.blended} />
-                    <div style={{ marginTop:8,padding:"8px 12px",background:"#0c0e1266",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center" }}>
-                      <span style={{ fontSize:10,color:"#8a8f98" }}>Margin of Safety</span>
-                      <span style={{ fontSize:13,fontWeight:600,color:result.marginOfSafety>=30?"#34d399":result.marginOfSafety>=15?"#fbbf24":"#f87171" }}>
-                        {result.marginOfSafety.toFixed(1)}%
-                        <span style={{ fontSize:9,color:"#565b64",marginLeft:6 }}>{result.marginOfSafety>=30?"Strong":result.marginOfSafety>=15?"Moderate":"Weak"}</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Models */}
-                  <div style={{ display:"grid",gridTemplateColumns:"1fr 1fr",gap:10 }}>
-                    <ModelCard name="DCF" value={result.models.DCF} weight={result.weights.DCF} price={params.price} icon="◆" />
-                    <ModelCard name="DDM" value={result.models.DDM} weight={result.weights.DDM} price={params.price} icon="◇" />
-                    <ModelCard name="P/E Multiple" value={result.models.PE} weight={result.weights.PE} price={params.price} icon="▣" />
-                    <ModelCard name="Graham №" value={result.models.Graham} weight={result.weights.Graham} price={params.price} icon="△" />
-                  </div>
-
-                  {/* DCF Breakdown */}
-                  <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px" }}>
-                    <div style={{ fontSize:10,letterSpacing:"0.1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:10 }}>DCF Breakdown</div>
-                    <div style={{ display:"flex",gap:20 }}>
-                      <div><div style={{ fontSize:9,color:"#565b64" }}>5-Year PV of FCF</div><div style={{ fontSize:15,fontWeight:600,color:"#4a9eff" }}>{fmt(result.dcfResult.projectedValue)}</div></div>
-                      <div><div style={{ fontSize:9,color:"#565b64" }}>PV of Terminal</div><div style={{ fontSize:15,fontWeight:600,color:"#818cf8" }}>{fmt(result.dcfResult.terminalPV)}</div></div>
-                      <div><div style={{ fontSize:9,color:"#565b64" }}>Terminal % of Total</div><div style={{ fontSize:15,fontWeight:600,color:"#8a8f98" }}>{result.dcfResult.total>0?((result.dcfResult.terminalPV/result.dcfResult.total)*100).toFixed(0):0}%</div></div>
-                    </div>
-                  </div>
-
-                  {/* Active Rules */}
-                  <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px" }}>
-                    <div style={{ fontSize:10,letterSpacing:"0.1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:8 }}>Active Rules</div>
-                    <div style={{ display:"flex",flexWrap:"wrap",gap:6 }}>
-                      {params.dividend<=0 && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>A: No dividend → DDM disabled</span>}
-                      {(params.bvps<=0||SERVICE_SECTORS.includes(params.sector.toLowerCase())) && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>B: {params.bvps<=0?"Negative BVPS":"Service sector"} → Graham disabled</span>}
-                      {params.epsTtm<=0 && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>C: Negative EPS → Graham & P/E disabled</span>}
-                      {params.dividend>0&&params.gDiv>=params.r && <span style={{ fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4 }}>D: g_div ≥ r → capped at {pct(params.r-0.01)}</span>}
-                      {params.dividend>0&&params.gDiv<params.r&&!(params.bvps<=0||SERVICE_SECTORS.includes(params.sector.toLowerCase()))&&params.epsTtm>0 && <span style={{ fontSize:10,background:"#1e2028",color:"#565b64",padding:"3px 8px",borderRadius:4 }}>All models active — equal weighting</span>}
-                    </div>
-                  </div>
-
-                  {/* Sensitivity */}
-                  <button onClick={()=>setShowSens(!showSens)} onMouseEnter={()=>setSensHov(true)} onMouseLeave={()=>setSensHov(false)}
-                    style={{ background:"#111318",border:"1px solid "+(sensHov?"#4a9eff":"#2a2d35"),borderRadius:8,padding:"10px 16px",color:"#8a8f98",fontFamily:"'JetBrains Mono',monospace",fontSize:11,cursor:"pointer",textAlign:"left",transition:"border-color 0.15s" }}>
-                    {showSens?"▾":"▸"} Sensitivity Analysis (Discount Rate × FCF Growth)
-                  </button>
-                  {showSens && sensData && (
-                    <div style={{ background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:16,overflowX:"auto" }}>
-                      <table style={{ width:"100%",borderCollapse:"collapse",fontSize:11 }}>
-                        <thead><tr>
-                          <th style={{ padding:"6px 8px",color:"#565b64",textAlign:"left",fontSize:9 }}>r \ g_fcf</th>
-                          {[-0.02,-0.01,0,0.01,0.02].map(dg=><th key={dg} style={{ padding:"6px 8px",color:"#8a8f98",textAlign:"right",fontSize:10 }}>{pct(params.gFcf+dg)}</th>)}
-                        </tr></thead>
-                        <tbody>{sensData.map((row,ri)=>{
-                          const dr=[-0.02,-0.01,0,0.01,0.02][ri];
-                          return <tr key={ri}>
-                            <td style={{ padding:"6px 8px",color:"#8a8f98",fontWeight:500,fontSize:10 }}>{pct(params.r+dr)}</td>
-                            {row.map((val,ci)=>{const c=ri===2&&ci===2;return <td key={ci} style={{ padding:"6px 8px",textAlign:"right",color:val>params.price?"#34d399":"#f87171",fontWeight:c?700:400,background:c?"#1e2a3a":"transparent",borderRadius:c?4:0 }}>{fmt(val)}</td>;})}
-                          </tr>;
-                        })}</tbody>
-                      </table>
-                      <div style={{ fontSize:9,color:"#565b64",marginTop:8,textAlign:"center" }}>Green = above market price · Highlighted = current inputs</div>
-                    </div>
-                  )}
-                  <div style={{ fontSize:9,color:"#3a3d45",lineHeight:1.5,padding:"8px 0",borderTop:"1px solid #1a1c22" }}>
-                    This is an educational tool, not financial advice. Models use simplified assumptions. Always conduct thorough due diligence.
-                  </div>
-                </>) : (
-                  <div style={{ background:"#111318",border:"1px solid #2a2d35",borderRadius:12,padding:40,textAlign:"center",color:"#565b64" }}>No valid valuation models available for this input combination.</div>
-                )}
+            <div style={{height:1,background:"#1e2028"}}/>
+            <div>
+              <div style={{fontSize:9,color:"#565b64",letterSpacing:".12em",marginBottom:10,textTransform:"uppercase"}}>Price & Earnings</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <InputField label="Market Price" value={params.price} onChange={set("price")} suffix="$"/>
+                <InputField label="EPS (TTM)" value={params.epsTtm} onChange={set("epsTtm")} suffix="$" tooltip="Trailing 12-month earnings per share"/>
+                <InputField label="EPS (Fwd)" value={params.epsFwd} onChange={set("epsFwd")} suffix="$" tooltip="Forward consensus estimate"/>
+                <InputField label="Book Value/Sh" value={params.bvps} onChange={set("bvps")} suffix="$"/>
+              </div>
+            </div>
+            <div style={{height:1,background:"#1e2028"}}/>
+            <div>
+              <div style={{fontSize:9,color:"#565b64",letterSpacing:".12em",marginBottom:10,textTransform:"uppercase"}}>Cash Flow & Dividends</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <InputField label="FCF / Share" value={params.fcf} onChange={set("fcf")} suffix="$" tooltip="Free cash flow per share"/>
+                <InputField label="FCF Growth" value={params.gFcf} onChange={set("gFcf")} step="0.005" tooltip="Annual FCF growth rate (decimal)"/>
+                <InputField label="Dividend / Sh" value={params.dividend} onChange={set("dividend")} suffix="$"/>
+                <InputField label="Div Growth" value={params.gDiv} onChange={set("gDiv")} step="0.005"/>
+              </div>
+            </div>
+            <div style={{height:1,background:"#1e2028"}}/>
+            <div>
+              <div style={{fontSize:9,color:"#565b64",letterSpacing:".12em",marginBottom:10,textTransform:"uppercase"}}>Model Parameters</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <InputField label="Discount Rate" value={params.r} onChange={set("r")} step="0.005" min="0.01" tooltip="Required rate of return (WACC)"/>
+                <InputField label="Terminal Growth" value={params.gTerminal} onChange={set("gTerminal")} step="0.005" tooltip="Long-term perpetuity growth"/>
+                <InputField label="Target P/E" value={params.peTarget} onChange={set("peTarget")} step="0.5" tooltip="Fair P/E multiple for sector"/>
               </div>
             </div>
           </div>
-        </div>
-      );
-    }
 
-    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(React.StrictMode, null, React.createElement(StockValuator)));
-  </script>
+          {/* ── Right: Results ── */}
+          <div style={{display:"flex",flexDirection:"column",gap:16}}>
+            {result?(<>
+              {/* Verdict */}
+              <div style={{background:result.verdict==="UNDERVALUED"?"linear-gradient(135deg,#0a2a1f,#112820)":"linear-gradient(135deg,#2a0f0f,#281414)",border:"1px solid "+(result.verdict==="UNDERVALUED"?"#1a4a35":"#4a1a1a"),borderRadius:12,padding:"20px 24px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{fontSize:10,letterSpacing:".12em",textTransform:"uppercase",color:result.verdict==="UNDERVALUED"?"#34d399":"#f87171",marginBottom:6,fontWeight:600}}>{params.ticker} · {result.verdict}</div>
+                    <div style={{fontFamily:sans,fontSize:36,fontWeight:700,color:result.verdict==="UNDERVALUED"?"#34d399":"#f87171"}}>{fmt(result.blended)}</div>
+                    <div style={{fontSize:11,color:"#8a8f98",marginTop:4}}>Blended Intrinsic Value</div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:10,color:"#8a8f98",marginBottom:4}}>Market Price</div>
+                    <div style={{fontFamily:sans,fontSize:22,fontWeight:600,color:"#e8eaed"}}>${params.price.toFixed(2)}</div>
+                    <div style={{fontSize:13,fontWeight:600,marginTop:4,color:result.discount>0?"#34d399":"#f87171"}}>
+                      {result.discount>0?"▲":"▼"} {Math.abs(result.discount).toFixed(1)}% {result.discount>0?"upside":"downside"}
+                    </div>
+                  </div>
+                </div>
+                <BarGauge price={params.price} blended={result.blended}/>
+                <div style={{marginTop:8,padding:"8px 12px",background:"#0c0e1266",borderRadius:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span style={{fontSize:10,color:"#8a8f98"}}>Margin of Safety</span>
+                  <span style={{fontSize:13,fontWeight:600,color:result.marginOfSafety>=30?"#34d399":result.marginOfSafety>=15?"#fbbf24":"#f87171"}}>
+                    {result.marginOfSafety.toFixed(1)}%
+                    <span style={{fontSize:9,color:"#565b64",marginLeft:6}}>{result.marginOfSafety>=30?"Strong":result.marginOfSafety>=15?"Moderate":"Weak"}</span>
+                  </span>
+                </div>
+              </div>
+
+              {/* Models */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                <ModelCard name="DCF" value={result.models.DCF} weight={result.weights.DCF} price={params.price} icon="◆"/>
+                <ModelCard name="DDM" value={result.models.DDM} weight={result.weights.DDM} price={params.price} icon="◇"/>
+                <ModelCard name="P/E Multiple" value={result.models.PE} weight={result.weights.PE} price={params.price} icon="▣"/>
+                <ModelCard name="Graham №" value={result.models.Graham} weight={result.weights.Graham} price={params.price} icon="△"/>
+              </div>
+
+              {/* DCF Breakdown */}
+              <div style={{background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px"}}>
+                <div style={{fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:10}}>DCF Breakdown</div>
+                <div style={{display:"flex",gap:20}}>
+                  <div><div style={{fontSize:9,color:"#565b64"}}>5-Year PV of FCF</div><div style={{fontSize:15,fontWeight:600,color:"#4a9eff"}}>{fmt(result.dcfResult.projectedValue)}</div></div>
+                  <div><div style={{fontSize:9,color:"#565b64"}}>PV of Terminal</div><div style={{fontSize:15,fontWeight:600,color:"#818cf8"}}>{fmt(result.dcfResult.terminalPV)}</div></div>
+                  <div><div style={{fontSize:9,color:"#565b64"}}>Terminal % of Total</div><div style={{fontSize:15,fontWeight:600,color:"#8a8f98"}}>{result.dcfResult.total>0?((result.dcfResult.terminalPV/result.dcfResult.total)*100).toFixed(0):0}%</div></div>
+                </div>
+              </div>
+
+              {/* Active Rules */}
+              <div style={{background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px"}}>
+                <div style={{fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:8}}>Active Rules</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                  {params.dividend<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>A: No dividend → DDM disabled</span>}
+                  {(params.bvps<=0||SERVICE_SECTORS.includes((params.sector||"").toLowerCase()))&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>B: {params.bvps<=0?"Negative BVPS":"Service sector"} → Graham disabled</span>}
+                  {params.epsTtm<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>C: Negative EPS → Graham & P/E disabled</span>}
+                  {params.dividend>0&&params.gDiv>=params.r&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>D: g_div ≥ r → capped at {pct(params.r-.01)}</span>}
+                  {params.dividend>0&&params.gDiv<params.r&&!(params.bvps<=0||SERVICE_SECTORS.includes((params.sector||"").toLowerCase()))&&params.epsTtm>0&&<span style={{fontSize:10,background:"#1e2028",color:"#565b64",padding:"3px 8px",borderRadius:4}}>All models active — equal weighting</span>}
+                </div>
+              </div>
+
+              {/* Sensitivity */}
+              <button onClick={()=>setShowSens(!showSens)} onMouseEnter={()=>setSensHov(true)} onMouseLeave={()=>setSensHov(false)}
+                style={{background:"#111318",border:"1px solid "+(sensHov?"#4a9eff":"#2a2d35"),borderRadius:8,padding:"10px 16px",color:"#8a8f98",fontFamily:mono,fontSize:11,cursor:"pointer",textAlign:"left",transition:"border-color .15s"}}>
+                {showSens?"▾":"▸"} Sensitivity Analysis (Discount Rate × FCF Growth)
+              </button>
+              {showSens&&sensData&&(
+                <div style={{background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:16,overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+                    <thead><tr>
+                      <th style={{padding:"6px 8px",color:"#565b64",textAlign:"left",fontSize:9}}>r \ g_fcf</th>
+                      {[-.02,-.01,0,.01,.02].map(dg=><th key={dg} style={{padding:"6px 8px",color:"#8a8f98",textAlign:"right",fontSize:10}}>{pct(params.gFcf+dg)}</th>)}
+                    </tr></thead>
+                    <tbody>{sensData.map((row,ri)=>{
+                      const dr=[-.02,-.01,0,.01,.02][ri];
+                      return<tr key={ri}>
+                        <td style={{padding:"6px 8px",color:"#8a8f98",fontWeight:500,fontSize:10}}>{pct(params.r+dr)}</td>
+                        {row.map((val,ci)=>{const c=ri===2&&ci===2;return<td key={ci} style={{padding:"6px 8px",textAlign:"right",color:val>params.price?"#34d399":"#f87171",fontWeight:c?700:400,background:c?"#1e2a3a":"transparent",borderRadius:c?4:0}}>{fmt(val)}</td>})}
+                      </tr>
+                    })}</tbody>
+                  </table>
+                  <div style={{fontSize:9,color:"#565b64",marginTop:8,textAlign:"center"}}>Green = above market price · Highlighted = current inputs</div>
+                </div>
+              )}
+              <div style={{fontSize:9,color:"#3a3d45",lineHeight:1.5,padding:"8px 0",borderTop:"1px solid #1a1c22"}}>This is an educational tool, not financial advice. Models use simplified assumptions. Always conduct thorough due diligence.</div>
+            </>):(
+              <div style={{background:"#111318",border:"1px solid #2a2d35",borderRadius:12,padding:40,textAlign:"center",color:"#565b64"}}>No valid valuation models available for this input combination.</div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(React.StrictMode,null,React.createElement(App)));
+</script>
 </body>
 </html>
