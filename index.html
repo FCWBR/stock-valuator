@@ -39,8 +39,8 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v2.2.1";
-const BUILD_DATE="2026-03-25 00:15";
+const APP_VERSION="v2.3.0";
+const BUILD_DATE="2026-03-25 00:30";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -532,22 +532,46 @@ function App(){
           rawDebug.massiveFinancialsTTM=m.raw.financialsTTM;
           rawDebug.massiveFinancialsAnnual=m.raw.financialsAnnual;
           rawDebug.massiveParsed=m.raw.massiveParsed||{note:"no financials found"};
-          if(m.price>0){fd.price=m.price;}
-          // Fill in any fields that FMP left at 0 — use explicit checks since negative values are valid (biotech etc)
-          if(fd.epsTtm===0&&fd.epsTtm!==undefined&&m.epsTtm!==undefined)fd.epsTtm=m.epsTtm;
-          if(fd.bvps===0&&m.bvps!==undefined)fd.bvps=m.bvps;
-          if(fd.fcf===0&&m.fcf!==undefined)fd.fcf=m.fcf;
+          // Price: Massive overrides if available
+          if(m.price>0)fd.price=m.price;
+          // Fill in zero fields from Massive (negative values are valid for biotech etc)
+          if(fd.epsTtm===0&&m.epsTtm!==undefined&&m.epsTtm!==null)fd.epsTtm=m.epsTtm;
+          if(fd.bvps===0&&m.bvps!==undefined&&m.bvps!==null)fd.bvps=m.bvps;
+          if(fd.fcf===0&&m.fcf!==undefined&&m.fcf!==null)fd.fcf=m.fcf;
           srcs.push("Massive");
           setApiStatus(p=>({...p,massive:"connected"}));
         }catch(e){console.warn("Massive:",e.message);setApiStatus(p=>({...p,massive:"error"}));}
       }
+
+      // Log final values for debugging
+      const finalValues={
+        price:fd.price||0, epsTtm:fd.epsTtm||0, epsFwd:fd.epsFwd||0,
+        bvps:fd.bvps||0, dividend:fd.dividend||0, fcf:fd.fcf||0,
+        sector:fd.sector||"", peTarget:fd.peTarget||15,
+        companyName:fd.companyName||""
+      };
+      console.log("FINAL values to set:",finalValues);
+      rawDebug.finalValues=finalValues;
       setDebugData(rawDebug);
+
       if(srcs.length===0)throw new Error("All API calls failed — check your keys and ticker symbol.");
-      setParams(p=>({...p,
-        price:fd.price||p.price,epsTtm:fd.epsTtm??p.epsTtm,epsFwd:fd.epsFwd??p.epsFwd,
-        bvps:fd.bvps??p.bvps,dividend:fd.dividend??p.dividend,fcf:fd.fcf??p.fcf,
-        sector:fd.sector||p.sector,peTarget:fd.peTarget||p.peTarget,
-      }));
+
+      // Use explicit value or keep existing — use || for numbers where 0 means "not found"
+      // but use the raw fd value for epsTtm, fcf, bvps since they can be legitimately negative
+      setParams(p=>{
+        const next={...p,
+          price:fd.price||p.price,
+          epsTtm:fd.epsTtm!==undefined&&fd.epsTtm!==null&&fd.epsTtm!==0?fd.epsTtm:p.epsTtm,
+          epsFwd:fd.epsFwd||p.epsFwd,
+          bvps:fd.bvps!==undefined&&fd.bvps!==null&&fd.bvps!==0?fd.bvps:p.bvps,
+          dividend:fd.dividend||p.dividend,
+          fcf:fd.fcf!==undefined&&fd.fcf!==null&&fd.fcf!==0?fd.fcf:p.fcf,
+          sector:fd.sector||p.sector,
+          peTarget:fd.peTarget||p.peTarget,
+        };
+        console.log("setParams prev:",p,"next:",next);
+        return next;
+      });
       if(fd.companyName)setCoName(fd.companyName);
       setHasFetched(true);
       setFetchSt({loading:false,error:null,sources:srcs});
