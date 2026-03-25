@@ -39,8 +39,8 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v3.1.0";
-const BUILD_DATE="2026-03-25 01:30";
+const APP_VERSION="v3.2.0";
+const BUILD_DATE="2026-03-25 01:45";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -49,11 +49,11 @@ function calcDCF(fcf,gFcf,gT,r,y=5){
   const tf=fcf*Math.pow(1+gFcf,y);
   const tvRaw=tf>0?(tf*(1+gT))/(r-gT):0;
   const pvT=tvRaw/Math.pow(1+r,y);
-  const total=d+pvT;
-  return{projectedValue:d,terminalPV:pvT,total:total>0?total:0};
+  return{projectedValue:d,terminalPV:pvT,total:d+pvT};
 }
 function calcDDM(div,gDiv,r){if(div<=0)return 0;const g=Math.min(gDiv,r-.01);return(div*(1+g))/(r-g);}
-function calcPE(eF,peT,r){return eF<=0?0:(eF*peT)/(1+r);}
+// P/E: standard — EPS × target multiple (no discounting)
+function calcPE(eF,peT){return eF>0&&peT>0?eF*peT:0;}
 function calcGraham(e,b){return(e<=0||b<=0)?0:Math.sqrt(22.5*e*b);}
 function calcPB(bvps,pbTarget){return bvps>0?bvps*pbTarget:0;}
 
@@ -61,29 +61,65 @@ function evaluate(p){
   const dcfR=calcDCF(p.fcf,p.gFcf,p.gTerminal,p.r);
   const vDcf=dcfR.total;
   const vDdm=calcDDM(p.dividend,p.gDiv,p.r);
-  const vPe=calcPE(p.epsFwd,p.peTarget,p.r);
+  // Use forward EPS if available, else TTM
+  const vPe=calcPE(p.epsFwd||p.epsTtm,p.peTarget);
   const vGr=calcGraham(p.epsTtm,p.bvps);
   const vPb=calcPB(p.bvps,p.pbTarget||1.0);
 
+  const divYield=p.price>0&&p.dividend>0?(p.dividend/p.price)*100:0;
+  const isProfitable=p.epsTtm>0;
+  const hasFCF=p.fcf>0;
+  const isService=SERVICE_SECTORS.includes((p.sector||"").toLowerCase());
+  const impliedPE=p.price>0&&p.epsTtm>0?p.price/p.epsTtm:0;
+
+  // ── Tiered weighting: primary=3, secondary=1 ──
   const w={DCF:0,DDM:0,PE:0,Graham:0,PB:0};
+  const reasons={};
 
-  // Only weight models that produce positive values
-  if(vDcf>0)w.DCF=1;
-  if(vDdm>0)w.DDM=1;
-  if(vPe>0)w.PE=1;
-  if(vGr>0&&!SERVICE_SECTORS.includes((p.sector||"").toLowerCase()))w.Graham=1;
-  if(vPb>0)w.PB=1;
+  // DCF: PRIMARY if positive FCF
+  if(hasFCF&&vDcf>0){w.DCF=3;}
+  else if(p.fcf===0){reasons.DCF="No FCF data available";}
+  else if(p.fcf<0){reasons.DCF="Negative FCF — DCF not applicable";}
+  else{reasons.DCF="DCF produced $0 — check growth assumptions";}
 
-  const n=Object.values(w).filter(v=>v>0).length;
-  if(n===0)return null;
-  const a=1/n;for(const k in w)if(w[k]>0)w[k]=a;
+  // P/E: PRIMARY if profitable
+  if(vPe>0){w.PE=3;}
+  else if(!isProfitable&&!p.epsFwd){reasons.PE="No positive earnings (TTM or forward)";}
+  else{reasons.PE="P/E produced $0";}
+
+  // DDM: SECONDARY, only if dividend yield ≥ 1.5%
+  if(vDdm>0&&divYield>=1.5){w.DDM=1;}
+  else if(p.dividend<=0){reasons.DDM="Company doesn't pay a dividend";}
+  else if(divYield<1.5){reasons.DDM="Yield too low ("+divYield.toFixed(1)+"%) — DDM unreliable";}
+  else{reasons.DDM="DDM produced $0";}
+
+  // Graham: SECONDARY, only for value stocks (non-service, P/E < 25)
+  if(vGr>0&&!isService&&impliedPE>0&&impliedPE<25){w.Graham=1;}
+  else if(!isProfitable){reasons.Graham="Requires positive trailing EPS";}
+  else if(p.bvps<=0){reasons.Graham="Requires positive book value";}
+  else if(isService){reasons.Graham="Not suited for "+p.sector+" sector";}
+  else if(impliedPE>=25){reasons.Graham="P/E too high ("+impliedPE.toFixed(0)+"×) — for value stocks only";}
+  else{reasons.Graham="Graham produced $0";}
+
+  // P/B: LAST RESORT — only if no primary model active (pre-profit companies)
+  const hasPrimary=w.DCF>0||w.PE>0;
+  if(!hasPrimary&&vPb>0){w.PB=2;}
+  else if(hasPrimary){reasons.PB="Skipped — better models active (DCF/P/E)";}
+  else if(p.bvps<=0){reasons.PB="Requires positive book value";}
+  else{reasons.PB="P/B produced $0";}
+
+  // Normalize weights to sum to 1.0
+  const totalW=Object.values(w).reduce((s,v)=>s+v,0);
+  if(totalW===0)return null;
+  for(const k in w)w[k]=w[k]/totalW;
 
   const bl=vDcf*w.DCF+vDdm*w.DDM+vPe*w.PE+vGr*w.Graham+vPb*w.PB;
   const d=bl!==0?((bl-p.price)/bl)*100:0;
   return{
     models:{DCF:vDcf,DDM:vDdm,PE:vPe,Graham:vGr,PB:vPb},
     weights:w,blended:bl,discount:isFinite(d)?d:0,marginOfSafety:isFinite(d)?d:0,
-    dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED"
+    dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED",
+    reasons
   };
 }
 function sensTable(p){
@@ -99,40 +135,8 @@ const sfmt=v=>{v=safe(v);return Math.abs(v).toFixed(1);};
 const pct=v=>(v*100).toFixed(1)+"%";
 
 function getModelReasons(p,result){
-  if(!result)return{};
-  const r={};
-  const w=result.weights;
-  const s=(p.sector||"").toLowerCase();
-  // DCF
-  if(!w.DCF){
-    if(p.fcf===0)r.DCF="No FCF data available";
-    else if(p.fcf<0)r.DCF="Negative FCF → negative DCF value";
-    else r.DCF="DCF produced $0";
-  }
-  // DDM
-  if(!w.DDM){
-    if(p.dividend<=0)r.DDM="Company doesn't pay a dividend";
-    else r.DDM="DDM produced $0";
-  }
-  // P/E
-  if(!w.PE){
-    if(!p.epsFwd||p.epsFwd<=0)r.PE="No positive forward EPS estimate";
-    else r.PE="P/E produced $0";
-  }
-  // Graham
-  if(!w.Graham){
-    if(p.epsTtm<=0&&p.bvps<=0)r.Graham="Requires positive EPS and book value";
-    else if(p.epsTtm<=0)r.Graham="Requires positive trailing EPS";
-    else if(p.bvps<=0)r.Graham="Requires positive book value";
-    else if(SERVICE_SECTORS.includes(s))r.Graham="Not suited for "+p.sector+" sector";
-    else r.Graham="Graham produced $0";
-  }
-  // P/B
-  if(!w.PB){
-    if(p.bvps<=0)r.PB="Requires positive book value";
-    else r.PB="P/B produced $0";
-  }
-  return r;
+  // Reasons are now computed inside evaluate()
+  return result?.reasons||{};
 }
 
 /* ── API Layer ── */
