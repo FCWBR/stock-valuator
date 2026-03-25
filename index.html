@@ -40,7 +40,7 @@ const SECTOR_MAP={
 };
 
 const APP_VERSION="v3.1.0";
-const BUILD_DATE="2026-03-25 01:15";
+const BUILD_DATE="2026-03-25 01:30";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
@@ -55,6 +55,7 @@ function calcDCF(fcf,gFcf,gT,r,y=5){
 function calcDDM(div,gDiv,r){if(div<=0)return 0;const g=Math.min(gDiv,r-.01);return(div*(1+g))/(r-g);}
 function calcPE(eF,peT,r){return eF<=0?0:(eF*peT)/(1+r);}
 function calcGraham(e,b){return(e<=0||b<=0)?0:Math.sqrt(22.5*e*b);}
+function calcPB(bvps,pbTarget){return bvps>0?bvps*pbTarget:0;}
 
 function evaluate(p){
   const dcfR=calcDCF(p.fcf,p.gFcf,p.gTerminal,p.r);
@@ -62,26 +63,25 @@ function evaluate(p){
   const vDdm=calcDDM(p.dividend,p.gDiv,p.r);
   const vPe=calcPE(p.epsFwd,p.peTarget,p.r);
   const vGr=calcGraham(p.epsTtm,p.bvps);
-  // NAV = book value per share (floor valuation for pre-profit companies)
-  const vNav=p.bvps>0?p.bvps:0;
+  const vPb=calcPB(p.bvps,p.pbTarget||1.0);
 
-  const w={DCF:0,DDM:0,PE:0,Graham:0,NAV:0};
+  const w={DCF:0,DDM:0,PE:0,Graham:0,PB:0};
 
   // Only weight models that produce positive values
   if(vDcf>0)w.DCF=1;
   if(vDdm>0)w.DDM=1;
   if(vPe>0)w.PE=1;
   if(vGr>0&&!SERVICE_SECTORS.includes((p.sector||"").toLowerCase()))w.Graham=1;
-  if(vNav>0)w.NAV=1;
+  if(vPb>0)w.PB=1;
 
   const n=Object.values(w).filter(v=>v>0).length;
   if(n===0)return null;
   const a=1/n;for(const k in w)if(w[k]>0)w[k]=a;
 
-  const bl=vDcf*w.DCF+vDdm*w.DDM+vPe*w.PE+vGr*w.Graham+vNav*w.NAV;
+  const bl=vDcf*w.DCF+vDdm*w.DDM+vPe*w.PE+vGr*w.Graham+vPb*w.PB;
   const d=bl!==0?((bl-p.price)/bl)*100:0;
   return{
-    models:{DCF:vDcf,DDM:vDdm,PE:vPe,Graham:vGr,NAV:vNav},
+    models:{DCF:vDcf,DDM:vDdm,PE:vPe,Graham:vGr,PB:vPb},
     weights:w,blended:bl,discount:isFinite(d)?d:0,marginOfSafety:isFinite(d)?d:0,
     dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED"
   };
@@ -97,6 +97,43 @@ const safe=v=>(!isFinite(v)||isNaN(v))?0:v;
 const fmt=v=>{v=safe(v);return v>=1000?"$"+(v/1000).toFixed(1)+"k":"$"+v.toFixed(2);};
 const sfmt=v=>{v=safe(v);return Math.abs(v).toFixed(1);};
 const pct=v=>(v*100).toFixed(1)+"%";
+
+function getModelReasons(p,result){
+  if(!result)return{};
+  const r={};
+  const w=result.weights;
+  const s=(p.sector||"").toLowerCase();
+  // DCF
+  if(!w.DCF){
+    if(p.fcf===0)r.DCF="No FCF data available";
+    else if(p.fcf<0)r.DCF="Negative FCF → negative DCF value";
+    else r.DCF="DCF produced $0";
+  }
+  // DDM
+  if(!w.DDM){
+    if(p.dividend<=0)r.DDM="Company doesn't pay a dividend";
+    else r.DDM="DDM produced $0";
+  }
+  // P/E
+  if(!w.PE){
+    if(!p.epsFwd||p.epsFwd<=0)r.PE="No positive forward EPS estimate";
+    else r.PE="P/E produced $0";
+  }
+  // Graham
+  if(!w.Graham){
+    if(p.epsTtm<=0&&p.bvps<=0)r.Graham="Requires positive EPS and book value";
+    else if(p.epsTtm<=0)r.Graham="Requires positive trailing EPS";
+    else if(p.bvps<=0)r.Graham="Requires positive book value";
+    else if(SERVICE_SECTORS.includes(s))r.Graham="Not suited for "+p.sector+" sector";
+    else r.Graham="Graham produced $0";
+  }
+  // P/B
+  if(!w.PB){
+    if(p.bvps<=0)r.PB="Requires positive book value";
+    else r.PB="P/B produced $0";
+  }
+  return r;
+}
 
 /* ── API Layer ── */
 async function testFMPKey(key){
@@ -455,16 +492,17 @@ function InputField({label,value,onChange,suffix,step="0.01",min,tooltip}){
   );
 }
 
-function ModelCard({name,value,weight,price,icon}){
+function ModelCard({name,value,weight,price,icon,reason}){
   const on=weight>0,up=value>price&&on;
   return(
-    <div style={{background:on?"#16181e":"#111318",border:"1px solid "+(on?"#2a2d35":"#1e2028"),borderRadius:10,padding:"14px 16px",opacity:on?1:.4,transition:"all .3s ease"}}>
+    <div style={{background:on?"#16181e":"#111318",border:"1px solid "+(on?"#2a2d35":"#1e2028"),borderRadius:10,padding:"14px 16px",opacity:on?1:.45,transition:"all .3s ease"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-        <span style={{fontFamily:mono,fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8f98"}}>{icon} {name}</span>
-        <span style={{fontFamily:mono,fontSize:10,background:on?"#1e2a3a":"#1a1c22",color:on?"#4a9eff":"#444",padding:"2px 7px",borderRadius:4}}>{(weight*100).toFixed(0)}%</span>
+        <span style={{fontFamily:mono,fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:on?"#8a8f98":"#565b64"}}>{icon} {name}</span>
+        <span style={{fontFamily:mono,fontSize:10,background:on?"#1e2a3a":"#1a1c22",color:on?"#4a9eff":"#444",padding:"2px 7px",borderRadius:4}}>{on?((weight*100).toFixed(0)+"%"):"OFF"}</span>
       </div>
       <div style={{fontFamily:mono,fontSize:20,fontWeight:700,color:!on?"#444":up?"#34d399":"#f87171"}}>{on?fmt(value):"N/A"}</div>
       {on&&<div style={{fontFamily:mono,fontSize:10,marginTop:4,color:up?"#34d39988":"#f8717188"}}>{up?"▲":"▼"} {sfmt(((value-price)/price)*100)}% vs price</div>}
+      {!on&&reason&&<div style={{fontFamily:mono,fontSize:9,marginTop:4,color:"#565b64",lineHeight:1.4}}>{reason}</div>}
     </div>
   );
 }
@@ -528,6 +566,7 @@ function App(){
 
   const set=k=>v=>setParams(p=>({...p,[k]:v}));
   const result=useMemo(()=>evaluate(params),[params]);
+  const reasons=useMemo(()=>getModelReasons(params,result),[params,result]);
   const sensData=useMemo(()=>showSens?sensTable(params):null,[params,showSens]);
   const hasKeys=keys.fmp||keys.massive;
 
@@ -619,7 +658,7 @@ function App(){
               <span style={{fontSize:10,color:"#565b64",letterSpacing:".08em"}}>MULTI-MODEL</span>
               <span style={{fontSize:9,color:"#3a3d45",letterSpacing:".05em"}}>{APP_VERSION} · {BUILD_DATE}</span>
             </div>
-            <p style={{fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5}}>DCF · DDM · P/E · Graham · NAV — blended with conditional weighting</p>
+            <p style={{fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5}}>DCF · DDM · P/E · Graham · P/B — blended with conditional weighting</p>
           </div>
           <button onClick={()=>setSettingsOpen(true)} title="API Settings"
             style={{background:hasKeys?"#111318":"#1e2028",border:"1px solid "+(hasKeys?"#2a2d35":"#4a9eff44"),borderRadius:8,padding:"8px 12px",color:hasKeys?"#8a8f98":"#4a9eff",fontFamily:mono,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:6,transition:"all .15s"}}>
@@ -697,7 +736,7 @@ function App(){
                   Type a stock symbol like AAPL, UNH, or RXRX and hit Fetch to pull live fundamentals and run the multi-model valuation.
                 </div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginTop:24,maxWidth:420,margin:"24px auto 0"}}>
-                  {[{n:"DCF",i:"◆"},{n:"DDM",i:"◇"},{n:"P/E",i:"▣"},{n:"Graham",i:"△"},{n:"NAV",i:"▤"}].map(m=>(
+                  {[{n:"DCF",i:"◆"},{n:"DDM",i:"◇"},{n:"P/E",i:"▣"},{n:"Graham",i:"△"},{n:"P/B",i:"▧"}].map(m=>(
                     <div key={m.n} style={{background:"#16181e",border:"1px solid #1e2028",borderRadius:8,padding:"10px 12px",textAlign:"left"}}>
                       <span style={{fontFamily:mono,fontSize:9,letterSpacing:".1em",textTransform:"uppercase",color:"#565b64"}}>{m.i} {m.n}</span>
                       <div style={{fontFamily:mono,fontSize:16,fontWeight:700,color:"#2a2d35",marginTop:4}}>—</div>
@@ -734,11 +773,11 @@ function App(){
 
               {/* Models */}
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
-                <ModelCard name="DCF" value={result.models.DCF} weight={result.weights.DCF} price={params.price} icon="◆"/>
-                <ModelCard name="DDM" value={result.models.DDM} weight={result.weights.DDM} price={params.price} icon="◇"/>
-                <ModelCard name="P/E Multiple" value={result.models.PE} weight={result.weights.PE} price={params.price} icon="▣"/>
-                <ModelCard name="Graham №" value={result.models.Graham} weight={result.weights.Graham} price={params.price} icon="△"/>
-                <ModelCard name="Net Asset Value" value={result.models.NAV} weight={result.weights.NAV} price={params.price} icon="▤"/>
+                <ModelCard name="DCF" value={result.models.DCF} weight={result.weights.DCF} price={params.price} icon="◆" reason={reasons.DCF}/>
+                <ModelCard name="DDM" value={result.models.DDM} weight={result.weights.DDM} price={params.price} icon="◇" reason={reasons.DDM}/>
+                <ModelCard name="P/E Multiple" value={result.models.PE} weight={result.weights.PE} price={params.price} icon="▣" reason={reasons.PE}/>
+                <ModelCard name="Graham №" value={result.models.Graham} weight={result.weights.Graham} price={params.price} icon="△" reason={reasons.Graham}/>
+                <ModelCard name="Price/Book" value={result.models.PB} weight={result.weights.PB} price={params.price} icon="▧" reason={reasons.PB}/>
               </div>
 
               {/* DCF Breakdown */}
@@ -753,14 +792,31 @@ function App(){
 
               {/* Active Rules */}
               <div style={{background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px"}}>
-                <div style={{fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:8}}>Active Rules</div>
-                <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                  {params.dividend<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>No dividend → DDM disabled</span>}
-                  {params.epsTtm<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>Negative EPS → P/E & Graham disabled</span>}
-                  {params.fcf<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>Negative FCF → DCF disabled</span>}
-                  {params.bvps>0&&<span style={{fontSize:10,background:"#1a2a1f",color:"#34d399",padding:"3px 8px",borderRadius:4}}>NAV active (Book Value = ${params.bvps.toFixed(2)})</span>}
-                  {params.dividend>0&&params.gDiv>=params.r&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>g_div ≥ r → capped at {pct(params.r-.01)}</span>}
+                <div style={{fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:10}}>Model Status</div>
+                <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                  {[
+                    {key:"DCF",name:"DCF",desc:"Discounted Cash Flow"},
+                    {key:"DDM",name:"DDM",desc:"Dividend Discount Model"},
+                    {key:"PE",name:"P/E",desc:"Price/Earnings Multiple"},
+                    {key:"Graham",name:"Graham",desc:"Graham Number"},
+                    {key:"PB",name:"P/B",desc:"Price/Book Value"},
+                  ].map(m=>{
+                    const active=result.weights[m.key]>0;
+                    const wPct=(result.weights[m.key]*100).toFixed(0);
+                    return(
+                      <div key={m.key} style={{display:"flex",alignItems:"center",gap:8,padding:"4px 0"}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:active?"#34d399":"#f87171",flexShrink:0,boxShadow:active?"0 0 6px #34d39944":"none"}}/>
+                        <span style={{fontFamily:mono,fontSize:10,color:active?"#e8eaed":"#565b64",width:55,flexShrink:0}}>{m.name}</span>
+                        {active?(
+                          <span style={{fontSize:9,color:"#34d399"}}>Active — {wPct}% weight → {fmt(result.models[m.key])}</span>
+                        ):(
+                          <span style={{fontSize:9,color:"#565b64"}}>{reasons[m.key]||"Disabled"}</span>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
+                {params.dividend>0&&params.gDiv>=params.r&&<div style={{fontSize:9,color:"#fbbf24",marginTop:8,padding:"4px 8px",background:"#1e2028",borderRadius:4,display:"inline-block"}}>Note: Dividend growth ≥ discount rate → capped at {pct(params.r-.01)}</div>}
               </div>
 
               {/* Sensitivity */}
