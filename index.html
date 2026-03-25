@@ -39,15 +39,18 @@ const SECTOR_MAP={
   "Basic Materials":"Materials","Communication Services":"Communication Services",
 };
 
-const APP_VERSION="v2.3.0";
-const BUILD_DATE="2026-03-25 00:30";
+const APP_VERSION="v3.1.0";
+const BUILD_DATE="2026-03-25 01:15";
 
 /* ── Valuation Engine ── */
 function calcDCF(fcf,gFcf,gT,r,y=5){
   if(r<=gT||fcf<=0)return{projectedValue:0,terminalPV:0,total:0};
   let d=0;for(let t=1;t<=y;t++)d+=(fcf*Math.pow(1+gFcf,t))/Math.pow(1+r,t);
-  const tf=fcf*Math.pow(1+gFcf,y),tv=(tf*(1+gT))/(r-gT),pvT=tv/Math.pow(1+r,y);
-  return{projectedValue:d,terminalPV:pvT,total:d+pvT};
+  const tf=fcf*Math.pow(1+gFcf,y);
+  const tvRaw=tf>0?(tf*(1+gT))/(r-gT):0;
+  const pvT=tvRaw/Math.pow(1+r,y);
+  const total=d+pvT;
+  return{projectedValue:d,terminalPV:pvT,total:total>0?total:0};
 }
 function calcDDM(div,gDiv,r){if(div<=0)return 0;const g=Math.min(gDiv,r-.01);return(div*(1+g))/(r-g);}
 function calcPE(eF,peT,r){return eF<=0?0:(eF*peT)/(1+r);}
@@ -55,17 +58,33 @@ function calcGraham(e,b){return(e<=0||b<=0)?0:Math.sqrt(22.5*e*b);}
 
 function evaluate(p){
   const dcfR=calcDCF(p.fcf,p.gFcf,p.gTerminal,p.r);
-  const vD=dcfR.total,vDdm=calcDDM(p.dividend,p.gDiv,p.r),vPe=calcPE(p.epsFwd,p.peTarget,p.r),vGr=calcGraham(p.epsTtm,p.bvps);
-  const w={DCF:.25,DDM:.25,PE:.25,Graham:.25};
-  if(p.dividend<=0)w.DDM=0;
-  if(p.bvps<=0||SERVICE_SECTORS.includes((p.sector||"").toLowerCase()))w.Graham=0;
-  if(p.epsTtm<=0){w.Graham=0;w.PE=0;}
+  const vDcf=dcfR.total;
+  const vDdm=calcDDM(p.dividend,p.gDiv,p.r);
+  const vPe=calcPE(p.epsFwd,p.peTarget,p.r);
+  const vGr=calcGraham(p.epsTtm,p.bvps);
+  // NAV = book value per share (floor valuation for pre-profit companies)
+  const vNav=p.bvps>0?p.bvps:0;
+
+  const w={DCF:0,DDM:0,PE:0,Graham:0,NAV:0};
+
+  // Only weight models that produce positive values
+  if(vDcf>0)w.DCF=1;
+  if(vDdm>0)w.DDM=1;
+  if(vPe>0)w.PE=1;
+  if(vGr>0&&!SERVICE_SECTORS.includes((p.sector||"").toLowerCase()))w.Graham=1;
+  if(vNav>0)w.NAV=1;
+
   const n=Object.values(w).filter(v=>v>0).length;
   if(n===0)return null;
   const a=1/n;for(const k in w)if(w[k]>0)w[k]=a;
-  const bl=vD*w.DCF+vDdm*w.DDM+vPe*w.PE+vGr*w.Graham;
+
+  const bl=vDcf*w.DCF+vDdm*w.DDM+vPe*w.PE+vGr*w.Graham+vNav*w.NAV;
   const d=bl!==0?((bl-p.price)/bl)*100:0;
-  return{models:{DCF:vD,DDM:vDdm,PE:vPe,Graham:vGr},weights:w,blended:bl,discount:isFinite(d)?d:0,marginOfSafety:isFinite(d)?d:0,dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED"};
+  return{
+    models:{DCF:vDcf,DDM:vDdm,PE:vPe,Graham:vGr,NAV:vNav},
+    weights:w,blended:bl,discount:isFinite(d)?d:0,marginOfSafety:isFinite(d)?d:0,
+    dcfResult:dcfR,verdict:p.price<bl?"UNDERVALUED":"OVERVALUED"
+  };
 }
 function sensTable(p){
   const o=[-.02,-.01,0,.01,.02];
@@ -476,7 +495,7 @@ function App(){
   const[params,setParams]=useState({
     ticker:"",price:0,epsTtm:0,epsFwd:0,
     bvps:0,dividend:0,gDiv:0.06,fcf:0,
-    gFcf:0.06,gTerminal:0.025,r:0.09,peTarget:15,sector:""
+    gFcf:0.06,gTerminal:0.025,r:0.09,peTarget:15,pbTarget:1.0,sector:""
   });
   const[showSens,setShowSens]=useState(false);
   const[sensHov,setSensHov]=useState(false);
@@ -516,14 +535,31 @@ function App(){
     if(!params.ticker.trim())return;
     if(!keys.fmp&&!keys.massive){setSettingsOpen(true);return;}
     setFetchSt({loading:true,error:null,sources:[]});
-    const srcs=[];let fd={};let rawDebug={};
+    const srcs=[];
+    let price=0,epsTtm=0,epsFwd=0,bvps=0,dividend=0,fcf=0,sector="",peTarget=15,companyName="";
+    let rawDebug={};
     try{
-      // FMP: primary source
+      // ── FMP: primary source ──
       if(keys.fmp){
-        try{const res=await fetchFMP(params.ticker.trim(),keys.fmp);fd={...fd,...res.parsed};rawDebug={...res.raw};srcs.push("FMP");setApiStatus(p=>({...p,fmp:"connected"}));}
-        catch(e){console.warn("FMP:",e.message);setApiStatus(p=>({...p,fmp:"error"}));}
+        try{
+          const res=await fetchFMP(params.ticker.trim(),keys.fmp);
+          const f=res.parsed;
+          rawDebug={...res.raw};
+          if(f.price)price=f.price;
+          if(f.epsTtm)epsTtm=f.epsTtm;
+          if(f.epsFwd)epsFwd=f.epsFwd;
+          if(f.bvps)bvps=f.bvps;
+          if(f.dividend)dividend=f.dividend;
+          if(f.fcf)fcf=f.fcf;
+          if(f.sector)sector=f.sector;
+          if(f.peTarget)peTarget=f.peTarget;
+          if(f.companyName)companyName=f.companyName;
+          srcs.push("FMP");
+          setApiStatus(p=>({...p,fmp:"connected"}));
+        }catch(e){console.warn("FMP:",e.message);setApiStatus(p=>({...p,fmp:"error"}));}
       }
-      // Massive: price + fallback fundamentals for missing fields
+
+      // ── Massive: price always, fundamentals fill gaps ──
       if(keys.massive){
         try{
           const m=await fetchMassive(params.ticker.trim(),keys.massive);
@@ -532,47 +568,36 @@ function App(){
           rawDebug.massiveFinancialsTTM=m.raw.financialsTTM;
           rawDebug.massiveFinancialsAnnual=m.raw.financialsAnnual;
           rawDebug.massiveParsed=m.raw.massiveParsed||{note:"no financials found"};
-          // Price: Massive overrides if available
-          if(m.price>0)fd.price=m.price;
-          // Fill in zero fields from Massive (negative values are valid for biotech etc)
-          if(fd.epsTtm===0&&m.epsTtm!==undefined&&m.epsTtm!==null)fd.epsTtm=m.epsTtm;
-          if(fd.bvps===0&&m.bvps!==undefined&&m.bvps!==null)fd.bvps=m.bvps;
-          if(fd.fcf===0&&m.fcf!==undefined&&m.fcf!==null)fd.fcf=m.fcf;
+          // Massive price overrides
+          if(m.price)price=m.price;
+          // Only fill fields that are still 0 (not found from FMP)
+          if(!epsTtm&&m.epsTtm)epsTtm=m.epsTtm;
+          if(!bvps&&m.bvps)bvps=m.bvps;
+          if(!fcf&&m.fcf)fcf=m.fcf;
           srcs.push("Massive");
           setApiStatus(p=>({...p,massive:"connected"}));
         }catch(e){console.warn("Massive:",e.message);setApiStatus(p=>({...p,massive:"error"}));}
       }
 
-      // Log final values for debugging
-      const finalValues={
-        price:fd.price||0, epsTtm:fd.epsTtm||0, epsFwd:fd.epsFwd||0,
-        bvps:fd.bvps||0, dividend:fd.dividend||0, fcf:fd.fcf||0,
-        sector:fd.sector||"", peTarget:fd.peTarget||15,
-        companyName:fd.companyName||""
-      };
-      console.log("FINAL values to set:",finalValues);
-      rawDebug.finalValues=finalValues;
+      // Debug
+      rawDebug.finalValues={price,epsTtm,epsFwd,bvps,dividend,fcf,sector,peTarget};
+      console.log("FINAL:",rawDebug.finalValues);
       setDebugData(rawDebug);
 
       if(srcs.length===0)throw new Error("All API calls failed — check your keys and ticker symbol.");
 
-      // Use explicit value or keep existing — use || for numbers where 0 means "not found"
-      // but use the raw fd value for epsTtm, fcf, bvps since they can be legitimately negative
-      setParams(p=>{
-        const next={...p,
-          price:fd.price||p.price,
-          epsTtm:fd.epsTtm!==undefined&&fd.epsTtm!==null&&fd.epsTtm!==0?fd.epsTtm:p.epsTtm,
-          epsFwd:fd.epsFwd||p.epsFwd,
-          bvps:fd.bvps!==undefined&&fd.bvps!==null&&fd.bvps!==0?fd.bvps:p.bvps,
-          dividend:fd.dividend||p.dividend,
-          fcf:fd.fcf!==undefined&&fd.fcf!==null&&fd.fcf!==0?fd.fcf:p.fcf,
-          sector:fd.sector||p.sector,
-          peTarget:fd.peTarget||p.peTarget,
-        };
-        console.log("setParams prev:",p,"next:",next);
-        return next;
-      });
-      if(fd.companyName)setCoName(fd.companyName);
+      // Set all values directly — no complex fallback logic
+      setParams(p=>({...p,
+        price:price||p.price,
+        epsTtm:epsTtm||p.epsTtm,
+        epsFwd:epsFwd||p.epsFwd,
+        bvps:bvps||p.bvps,
+        dividend:dividend||p.dividend,
+        fcf:fcf||p.fcf,
+        sector:sector||p.sector,
+        peTarget:peTarget||p.peTarget,
+      }));
+      if(companyName)setCoName(companyName);
       setHasFetched(true);
       setFetchSt({loading:false,error:null,sources:srcs});
     }catch(e){setFetchSt({loading:false,error:e.message,sources:[]});}
@@ -594,7 +619,7 @@ function App(){
               <span style={{fontSize:10,color:"#565b64",letterSpacing:".08em"}}>MULTI-MODEL</span>
               <span style={{fontSize:9,color:"#3a3d45",letterSpacing:".05em"}}>{APP_VERSION} · {BUILD_DATE}</span>
             </div>
-            <p style={{fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5}}>DCF · Dividend Discount · P/E Multiple · Graham Number — blended with conditional weighting</p>
+            <p style={{fontSize:11,color:"#565b64",marginTop:2,lineHeight:1.5}}>DCF · DDM · P/E · Graham · NAV — blended with conditional weighting</p>
           </div>
           <button onClick={()=>setSettingsOpen(true)} title="API Settings"
             style={{background:hasKeys?"#111318":"#1e2028",border:"1px solid "+(hasKeys?"#2a2d35":"#4a9eff44"),borderRadius:8,padding:"8px 12px",color:hasKeys?"#8a8f98":"#4a9eff",fontFamily:mono,fontSize:11,cursor:"pointer",display:"flex",alignItems:"center",gap:6,transition:"all .15s"}}>
@@ -657,6 +682,7 @@ function App(){
                 <InputField label="Discount Rate" value={params.r} onChange={set("r")} step="0.005" min="0.01" tooltip="Required rate of return (WACC)"/>
                 <InputField label="Terminal Growth" value={params.gTerminal} onChange={set("gTerminal")} step="0.005" tooltip="Long-term perpetuity growth"/>
                 <InputField label="Target P/E" value={params.peTarget} onChange={set("peTarget")} step="0.5" tooltip="Fair P/E multiple for sector"/>
+                <InputField label="Target P/B" value={params.pbTarget} onChange={set("pbTarget")} step="0.1" min="0.1" tooltip="Fair Price/Book multiple (1.0 = at book value)"/>
               </div>
             </div>
           </div>
@@ -670,8 +696,8 @@ function App(){
                 <div style={{fontSize:11,color:"#565b64",lineHeight:1.6,maxWidth:320,margin:"0 auto"}}>
                   Type a stock symbol like AAPL, UNH, or RXRX and hit Fetch to pull live fundamentals and run the multi-model valuation.
                 </div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginTop:24,maxWidth:360,margin:"24px auto 0"}}>
-                  {[{n:"DCF",i:"◆"},{n:"DDM",i:"◇"},{n:"P/E",i:"▣"},{n:"Graham",i:"△"}].map(m=>(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginTop:24,maxWidth:420,margin:"24px auto 0"}}>
+                  {[{n:"DCF",i:"◆"},{n:"DDM",i:"◇"},{n:"P/E",i:"▣"},{n:"Graham",i:"△"},{n:"NAV",i:"▤"}].map(m=>(
                     <div key={m.n} style={{background:"#16181e",border:"1px solid #1e2028",borderRadius:8,padding:"10px 12px",textAlign:"left"}}>
                       <span style={{fontFamily:mono,fontSize:9,letterSpacing:".1em",textTransform:"uppercase",color:"#565b64"}}>{m.i} {m.n}</span>
                       <div style={{fontFamily:mono,fontSize:16,fontWeight:700,color:"#2a2d35",marginTop:4}}>—</div>
@@ -707,11 +733,12 @@ function App(){
               </div>
 
               {/* Models */}
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10}}>
                 <ModelCard name="DCF" value={result.models.DCF} weight={result.weights.DCF} price={params.price} icon="◆"/>
                 <ModelCard name="DDM" value={result.models.DDM} weight={result.weights.DDM} price={params.price} icon="◇"/>
                 <ModelCard name="P/E Multiple" value={result.models.PE} weight={result.weights.PE} price={params.price} icon="▣"/>
                 <ModelCard name="Graham №" value={result.models.Graham} weight={result.weights.Graham} price={params.price} icon="△"/>
+                <ModelCard name="Net Asset Value" value={result.models.NAV} weight={result.weights.NAV} price={params.price} icon="▤"/>
               </div>
 
               {/* DCF Breakdown */}
@@ -728,11 +755,11 @@ function App(){
               <div style={{background:"#111318",border:"1px solid #1e2028",borderRadius:10,padding:"14px 16px"}}>
                 <div style={{fontSize:10,letterSpacing:".1em",textTransform:"uppercase",color:"#8a8f98",marginBottom:8}}>Active Rules</div>
                 <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                  {params.dividend<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>A: No dividend → DDM disabled</span>}
-                  {(params.bvps<=0||SERVICE_SECTORS.includes((params.sector||"").toLowerCase()))&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>B: {params.bvps<=0?"Negative BVPS":"Service sector"} → Graham disabled</span>}
-                  {params.epsTtm<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>C: Negative EPS → Graham & P/E disabled</span>}
-                  {params.dividend>0&&params.gDiv>=params.r&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>D: g_div ≥ r → capped at {pct(params.r-.01)}</span>}
-                  {params.dividend>0&&params.gDiv<params.r&&!(params.bvps<=0||SERVICE_SECTORS.includes((params.sector||"").toLowerCase()))&&params.epsTtm>0&&<span style={{fontSize:10,background:"#1e2028",color:"#565b64",padding:"3px 8px",borderRadius:4}}>All models active — equal weighting</span>}
+                  {params.dividend<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>No dividend → DDM disabled</span>}
+                  {params.epsTtm<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>Negative EPS → P/E & Graham disabled</span>}
+                  {params.fcf<=0&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>Negative FCF → DCF disabled</span>}
+                  {params.bvps>0&&<span style={{fontSize:10,background:"#1a2a1f",color:"#34d399",padding:"3px 8px",borderRadius:4}}>NAV active (Book Value = ${params.bvps.toFixed(2)})</span>}
+                  {params.dividend>0&&params.gDiv>=params.r&&<span style={{fontSize:10,background:"#1e2028",color:"#fbbf24",padding:"3px 8px",borderRadius:4}}>g_div ≥ r → capped at {pct(params.r-.01)}</span>}
                 </div>
               </div>
 
